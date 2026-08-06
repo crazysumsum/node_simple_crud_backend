@@ -1,0 +1,444 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
+import { AuthenticationError } from "../src/framework/auth/AuthenticationError.js";
+import { BaseAuthStrategy } from "../src/framework/auth/BaseAuthStrategy.js";
+import { createApplication } from "../src/framework/application/createApplication.js";
+import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
+import { ConfigurationError } from "../src/framework/configuration/ConfigurationError.js";
+
+function memoryLogger() {
+  const entries = [];
+  const write = (level) => async (event, message, context) => {
+    entries.push({ level, event, message, context });
+  };
+
+  return {
+    entries,
+    debug: write("debug"),
+    info: write("info"),
+    warn: write("warn"),
+    error: write("error"),
+    flush: async () => {}
+  };
+}
+
+function testRequestLogger() {
+  const middleware = (req, res, next) => {
+    req.requestId = "factory-request";
+    res.setHeader("X-Request-Id", req.requestId);
+    next();
+  };
+  middleware.flush = async () => {};
+  return middleware;
+}
+
+test("application factory validates configuration before creating the MySQL database pool", async () => {
+  const source = defaultConfigurationSource();
+  let poolFactoryCalls = 0;
+
+  await assert.rejects(
+    () =>
+      createApplication({
+        configurationSource: {
+          ...source,
+          application: { ...source.application, requestTimeoutMs: 0 }
+        },
+        serviceOptions: {
+          mysqldatabase: {
+            poolFactory: () => {
+              poolFactoryCalls += 1;
+              return {};
+            }
+          }
+        }
+      }),
+    ConfigurationError
+  );
+  assert.equal(poolFactoryCalls, 0);
+});
+
+test("application factory closes authentication strategies when setup fails", async () => {
+  const source = defaultConfigurationSource();
+  const logger = memoryLogger();
+  let closeCalls = 0;
+  let poolFactoryCalls = 0;
+  let poolEndCalls = 0;
+  class MissingApiHandler extends BaseRequestHandler {
+    static handlerName = "missingApi";
+  }
+  const strategies = {
+    has: () => true,
+    types: () => ["public", "jwt"],
+    authenticate: async (type) => ({ type }),
+    close: async () => {
+      closeCalls += 1;
+    }
+  };
+
+  await assert.rejects(() =>
+    createApplication({
+      configurationSource: source,
+      strategies,
+      handlers: {
+        missingApi: new MissingApiHandler({ logger })
+      },
+      logger,
+      requestLogger: testRequestLogger(),
+      serviceOptions: {
+        mysqldatabase: {
+          poolFactory: () => {
+            poolFactoryCalls += 1;
+            return {
+              query: async () => [[{ ok: 1 }]],
+              end: async () => {
+                poolEndCalls += 1;
+              }
+            };
+          }
+        }
+      }
+    })
+  );
+
+  assert.equal(closeCalls, 1);
+  assert.equal(poolFactoryCalls, 1);
+  assert.equal(poolEndCalls, 1);
+});
+
+test("application factory builds a startable and stoppable API with injected resources", async (t) => {
+  const source = defaultConfigurationSource();
+  const logger = memoryLogger();
+  let poolEndCalls = 0;
+  let poolQueryCalls = 0;
+  const pool = {
+    query: async () => {
+      poolQueryCalls += 1;
+      return [[{ ok: 1 }]];
+    },
+    end: async () => {
+      poolEndCalls += 1;
+    }
+  };
+  const application = await createApplication({
+    configurationSource: {
+      ...source,
+      application: {
+        ...source.application,
+        port: 0,
+        requestTimeoutMs: 100,
+        shutdownTimeoutMs: 1000
+      }
+    },
+    logger,
+    requestLogger: testRequestLogger(),
+    serviceOptions: { mysqldatabase: { pool } },
+    forceExit: () => {
+      throw new Error("Factory test must not force exit");
+    }
+  });
+  t.after(() => application.shutdown("test_cleanup"));
+
+  assert.equal(application.state, "created");
+  assert.equal(poolQueryCalls, 1);
+  const { url } = await application.start();
+  assert.equal(poolQueryCalls, 1);
+  const response = await fetch(`${url}/api/v1/health`);
+  const body = await response.json();
+
+  assert.equal(application.state, "started");
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+  assert.equal(body.data.database, "connected");
+  assert.equal(body.meta.requestId, "factory-request");
+
+  const result = await application.shutdown("test_complete");
+  assert.equal(application.state, "stopped");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.httpServerClosed, true);
+  assert.equal(result.authStrategiesClosed, true);
+  assert.equal(result.servicesClosed, true);
+  assert.equal(poolEndCalls, 1);
+  assert.ok(
+    logger.entries.some((entry) => entry.event === "configuration.validated")
+  );
+  assert.ok(
+    logger.entries.some((entry) => entry.event === "application.factory.created")
+  );
+  assert.ok(
+    logger.entries.some(
+      (entry) =>
+        entry.event === "handler.registered" &&
+        entry.context.handler === "healthCheck"
+    )
+  );
+  assert.ok(
+    logger.entries.some(
+      (entry) =>
+        entry.event === "auth.strategy.registered" &&
+        entry.context.authType === "jwt"
+    )
+  );
+});
+
+test("business handlers and auth strategies are auto-discovered from implementations", async (t) => {
+  let strategyInstances = 0;
+  let strategyCloseCalls = 0;
+  let businessServiceInstances = 0;
+  let businessServiceShutdowns = 0;
+  let requestServiceInstances = 0;
+  let requestServiceShutdowns = 0;
+
+  class ExampleBusinessService {
+    static service = {
+      name: "example",
+      lifecycle: "singleton",
+      dependencies: ["mysqldatabase"]
+    };
+
+    constructor({ services }) {
+      this.mysqlDatabase = services.require("mysqldatabase");
+      this.value = "auto-discovered";
+      businessServiceInstances += 1;
+    }
+
+    async shutdown() {
+      businessServiceShutdowns += 1;
+    }
+  }
+
+  class RequestBusinessService {
+    static service = {
+      name: "requestExample",
+      lifecycle: "request",
+      dependencies: []
+    };
+
+    constructor() {
+      this.instanceNumber = ++requestServiceInstances;
+    }
+
+    async shutdown() {
+      requestServiceShutdowns += 1;
+    }
+  }
+
+  class EchoBusinessHandler extends BaseRequestHandler {
+    static handlerName = "echoBusiness";
+
+    static api = {
+      method: "GET",
+      path: "/api/v1/echo",
+      description: "Exercise the zero-registry business API workflow.",
+      authType: "apiKey",
+      authorizationPolicies: [{ name: "allowAll", options: {} }],
+      requestSchema: {
+        query: {
+          type: "object",
+          required: ["message"],
+          additionalProperties: false,
+          properties: { message: { type: "string", minLength: 1 } }
+        }
+      },
+      responseSchema: {
+        200: {
+          type: "object",
+          required: [
+            "message",
+            "serviceValue",
+            "databaseAvailable",
+            "requestInstance"
+          ],
+          additionalProperties: false,
+          properties: {
+            message: { type: "string" },
+            serviceValue: { type: "string" },
+            databaseAvailable: { type: "boolean" },
+            requestInstance: { type: "integer" }
+          }
+        }
+      }
+    };
+
+    async execute(req) {
+      const requestService = await this.services.resolve("requestExample");
+
+      return {
+        message: req.input.query.message,
+        serviceValue: this.services.require("example").value,
+        databaseAvailable: typeof this.mysqlDatabase.query === "function",
+        requestInstance: requestService.instanceNumber
+      };
+    }
+  }
+
+  class ApiKeyAuthStrategy extends BaseAuthStrategy {
+    static authType = "apiKey";
+
+    constructor(services) {
+      super(services);
+      strategyInstances += 1;
+    }
+
+    async authenticate(req) {
+      if (
+        req.get("x-api-key") !==
+        this.services.require("acceptedApiKey")
+      ) {
+        throw new AuthenticationError("API_KEY_INVALID", "API key is invalid");
+      }
+
+      return { type: this.authType, clientId: "integration-test" };
+    }
+
+    async close() {
+      strategyCloseCalls += 1;
+    }
+  }
+
+  const source = defaultConfigurationSource();
+  const logger = memoryLogger();
+  const pool = {
+    query: async () => [[{ ok: 1 }]],
+    end: async () => {}
+  };
+  const application = await createApplication({
+    configurationSource: {
+      ...source,
+      application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 }
+    },
+    handlerRegistryOptions: {
+      moduleUrls: ["virtual:echoBusinessHandler"],
+      moduleLoader: async () => ({ EchoBusinessHandler })
+    },
+    serviceDiscoveryOptions: {
+      additionalModuleUrls: [
+        "virtual:exampleBusinessService",
+        "virtual:requestBusinessService"
+      ],
+      moduleLoader: async (url) => {
+        if (url === "virtual:exampleBusinessService") {
+          return { ExampleBusinessService };
+        }
+
+        if (url === "virtual:requestBusinessService") {
+          return { RequestBusinessService };
+        }
+
+        return import(url);
+      }
+    },
+    authStrategyRegistryOptions: {
+      moduleUrls: ["virtual:apiKeyAuthStrategy"],
+      moduleLoader: async () => ({ ApiKeyAuthStrategy })
+    },
+    authStrategyServices: { acceptedApiKey: "test-api-key" },
+    logger,
+    requestLogger: testRequestLogger(),
+    serviceOptions: { mysqldatabase: { pool } },
+    forceExit: () => {
+      throw new Error("Business API test must not force exit");
+    }
+  });
+  t.after(() => application.shutdown("test_cleanup"));
+
+  const { url } = await application.start();
+  assert.equal(strategyInstances, 1);
+  assert.equal(businessServiceInstances, 1);
+  assert.equal(
+    application.services.require("example").mysqlDatabase,
+    application.services.require("mysqldatabase")
+  );
+  const denied = await fetch(`${url}/api/v1/echo?message=hello`);
+  assert.equal(denied.status, 401);
+
+  const response = await fetch(`${url}/api/v1/echo?message=hello`, {
+    headers: { "X-API-Key": "test-api-key" }
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body.data, {
+    message: "hello",
+    serviceValue: "auto-discovered",
+    databaseAvailable: true,
+    requestInstance: 1
+  });
+  const secondResponse = await fetch(`${url}/api/v1/echo?message=again`, {
+    headers: { "X-API-Key": "test-api-key" }
+  });
+  assert.equal(secondResponse.status, 200);
+  assert.equal((await secondResponse.json()).data.requestInstance, 2);
+  assert.ok(
+    logger.entries.some(
+      (entry) =>
+        entry.event === "handler.registered" &&
+        entry.context.handler === "echoBusiness"
+    )
+  );
+  assert.ok(
+    logger.entries.some(
+      (entry) =>
+        entry.event === "auth.strategy.registered" &&
+        entry.context.authType === "apiKey"
+    )
+  );
+  const shutdown = await application.shutdown("test_complete");
+  assert.equal(shutdown.authStrategiesClosed, true);
+  assert.equal(strategyCloseCalls, 1);
+  assert.equal(businessServiceShutdowns, 1);
+  assert.equal(requestServiceInstances, 2);
+  assert.equal(requestServiceShutdowns, 2);
+});
+
+test("application creation fails and cleans up when an eager service cannot initialize", async () => {
+  const source = defaultConfigurationSource();
+  const logger = memoryLogger();
+  let poolQueryCalls = 0;
+  let poolEndCalls = 0;
+  const connectionError = Object.assign(new Error("MySQL is unavailable"), {
+    code: "ECONNREFUSED"
+  });
+
+  await assert.rejects(
+    () =>
+      createApplication({
+        configurationSource: {
+          ...source,
+          application: { ...source.application, port: 0 }
+        },
+        logger,
+        requestLogger: testRequestLogger(),
+        serviceOptions: {
+          mysqldatabase: {
+            pool: {
+              query: async () => {
+                poolQueryCalls += 1;
+                throw connectionError;
+              },
+              end: async () => {
+                poolEndCalls += 1;
+              }
+            }
+          }
+        }
+      }),
+    (error) => {
+      assert.equal(error.code, "DATABASE_OPERATION_FAILED");
+      assert.equal(error.cause, connectionError);
+      return true;
+    }
+  );
+
+  assert.equal(poolQueryCalls, 1);
+  assert.equal(poolEndCalls, 1);
+  assert.ok(
+    logger.entries.some(
+      (entry) => entry.event === "database.connection.failed"
+    )
+  );
+  assert.equal(
+    logger.entries.some((entry) => entry.event === "application.factory.created"),
+    false
+  );
+});
