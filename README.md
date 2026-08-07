@@ -4,7 +4,7 @@ Node.js + MySQL + Vue 3 development environment.
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 26+
 - npm 10+
 - MySQL 5.7+ or Docker Desktop
 
@@ -154,7 +154,7 @@ Queue waiting time and API processing time are separate limits. After a request 
 the queue, `REQUEST_TIMEOUT_MS` defines the default authentication, validation, and
 handler deadline. An API can override it with a positive `static api.timeoutMs` in its
 Handler. Timeout responses use HTTP 504 with
-`REQUEST_TIMEOUT`; handlers can observe `req.signal` and stop downstream work when it
+`REQUEST_TIMEOUT`; handlers can observe `req.requestTimeout.signal` and stop downstream work when it
 is aborted.
 
 ## API Configuration And Authentication

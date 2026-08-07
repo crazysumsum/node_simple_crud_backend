@@ -36,7 +36,6 @@ export function createRequestTimeoutMiddleware({
     const deadline = new Date(startedAt + normalizedTimeoutMs);
     let timer;
 
-    req.signal = controller.signal;
     req.requestTimeout = Object.freeze({
       timeoutMs: normalizedTimeoutMs,
       deadline: deadline.toISOString(),

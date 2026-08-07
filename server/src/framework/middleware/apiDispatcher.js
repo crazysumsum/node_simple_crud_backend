@@ -253,7 +253,7 @@ export function createApiDispatcher({
             () => handler.handle(req, res, next)
           );
         } catch (error) {
-          if (req.signal?.aborted && res.writableEnded) {
+          if (req.requestTimeout?.signal?.aborted && res.writableEnded) {
             return;
           }
 

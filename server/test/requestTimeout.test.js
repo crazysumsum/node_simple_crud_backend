@@ -21,7 +21,7 @@ async function startServer(t, app) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-test("request timeout returns the standard 504 response and aborts req.signal", async (t) => {
+test("request timeout returns the standard 504 response and aborts req.requestTimeout.signal", async (t) => {
   const entries = [];
   const logger = {
     warn: async (event, message, context) => {
@@ -42,7 +42,7 @@ test("request timeout returns the standard 504 response and aborts req.signal", 
     "/api/slow",
     createRequestTimeoutMiddleware({ timeoutMs: 20, logger, context }),
     async (req, res) => {
-      requestSignal = req.signal;
+      requestSignal = req.requestTimeout.signal;
       await new Promise((resolve) => setTimeout(resolve, 60));
 
       if (!res.headersSent) {

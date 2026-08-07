@@ -170,7 +170,8 @@ export class BaseRequestHandler {
       const endTime = new Date();
       const durationNs = process.hrtime.bigint() - startedAt;
       const requestTimedOut =
-        req.signal?.aborted && req.signal.reason?.code === "REQUEST_TIMEOUT";
+        req.requestTimeout?.signal?.aborted &&
+        req.requestTimeout.signal.reason?.code === "REQUEST_TIMEOUT";
       const context = {
         requestId,
         handler: this.handlerName,
