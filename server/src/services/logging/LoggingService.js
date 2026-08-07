@@ -7,23 +7,24 @@ export class LoggingService extends BaseService {
   static service = Object.freeze({
     name: "logging",
     lifecycle: "singleton",
-    dependencies: [],
+    dependencies: ["time"],
     eager: true
   });
 
   constructor({ config, services, options = {} } = {}) {
     super({ config, services, options });
 
+    this.time = services.require("time");
     this.loggers =
       options.loggerRegistry ||
-      new LoggerRegistry({ configs: config.logging.loggers });
+      new LoggerRegistry({ configs: config.logging.loggers, time: this.time });
     this.loggerManagedByRegistry = !options.logger;
     this.logger =
       options.logger ||
       new SystemLogger({ logger: this.loggers.require("system") });
     this.requestMiddleware =
       options.requestLogger ||
-      createRequestLogger({ logger: this.loggers.require("request") });
+      createRequestLogger({ logger: this.loggers.require("request"), time: this.time });
   }
 
   require(name) {

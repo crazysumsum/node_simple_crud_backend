@@ -8,6 +8,7 @@ import securityConfig from "../config/security.js";
 import { sendSuccess } from "../src/framework/http/apiResponse.js";
 import { createErrorHandler } from "../src/framework/middleware/errorHandler.js";
 import { normalizeSecurityConfig } from "../src/framework/security/normalizeSecurityConfig.js";
+import { createTestTime } from "../test-support/createTestTime.js";
 import {
   createCorsOptions,
   createHttpsEnforcementMiddleware
@@ -16,6 +17,7 @@ import {
 const silentLogger = {
   error: async () => {}
 };
+const time = createTestTime();
 
 async function startServer(t, app) {
   const server = createServer(app);
@@ -40,8 +42,8 @@ test("security middleware sets Helmet headers and enforces the CORS allowlist", 
   app.disable("x-powered-by");
   app.use(helmet());
   app.use(cors(createCorsOptions(security)));
-  app.get("/api/security", (_req, res) => sendSuccess(res, { ok: true }));
-  app.use(createErrorHandler({ logger: silentLogger }));
+  app.get("/api/security", (_req, res) => sendSuccess(res, { ok: true }, { time }));
+  app.use(createErrorHandler({ logger: silentLogger, time }));
   const baseUrl = await startServer(t, app);
 
   const allowedResponse = await fetch(`${baseUrl}/api/security`, {
@@ -66,8 +68,8 @@ test("JSON body parser returns the standard 413 response when its limit is excee
   const app = express();
   app.use(helmet());
   app.use(express.json({ limit: "20b" }));
-  app.post("/api/body", (req, res) => sendSuccess(res, req.body));
-  app.use(createErrorHandler({ logger: silentLogger }));
+  app.post("/api/body", (req, res) => sendSuccess(res, req.body, { time }));
+  app.use(createErrorHandler({ logger: silentLogger, time }));
   const baseUrl = await startServer(t, app);
 
   const response = await fetch(`${baseUrl}/api/body`, {
@@ -86,8 +88,8 @@ test("JSON body parser returns the standard 413 response when its limit is excee
 test("JSON body parser returns the standard 400 response for malformed JSON", async (t) => {
   const app = express();
   app.use(express.json({ limit: "100kb" }));
-  app.post("/api/body", (req, res) => sendSuccess(res, req.body));
-  app.use(createErrorHandler({ logger: silentLogger }));
+  app.post("/api/body", (req, res) => sendSuccess(res, req.body, { time }));
+  app.use(createErrorHandler({ logger: silentLogger, time }));
   const baseUrl = await startServer(t, app);
 
   const response = await fetch(`${baseUrl}/api/body`, {
@@ -111,8 +113,8 @@ test("HTTPS enforcement trusts only the configured reverse proxy hop", async (t)
   const app = express();
   app.set("trust proxy", security.reverseProxy.trustProxy);
   app.use(createHttpsEnforcementMiddleware(security));
-  app.get("/api/secure", (_req, res) => sendSuccess(res, { secure: true }));
-  app.use(createErrorHandler({ logger: silentLogger }));
+  app.get("/api/secure", (_req, res) => sendSuccess(res, { secure: true }, { time }));
+  app.use(createErrorHandler({ logger: silentLogger, time }));
   const baseUrl = await startServer(t, app);
 
   const insecureResponse = await fetch(`${baseUrl}/api/secure`);

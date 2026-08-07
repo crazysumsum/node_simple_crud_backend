@@ -33,9 +33,13 @@ function normalizeError(error) {
   });
 }
 
-export function createErrorHandler({ logger } = {}) {
+export function createErrorHandler({ logger, time } = {}) {
   if (!logger || typeof logger.error !== "function") {
     throw new TypeError("Error handler requires a system logger");
+  }
+
+  if (!time || typeof time.timestamp !== "function") {
+    throw new TypeError("Error handler requires a time service");
   }
 
   return function errorHandler(error, req, res, next) {
@@ -64,7 +68,8 @@ export function createErrorHandler({ logger } = {}) {
       statusCode: applicationError.statusCode,
       code: applicationError.publicCode,
       message: applicationError.publicMessage,
-      details: applicationError.publicDetails
+      details: applicationError.publicDetails,
+      time
     });
   };
 }

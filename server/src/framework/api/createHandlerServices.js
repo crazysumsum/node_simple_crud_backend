@@ -5,6 +5,7 @@ export function createHandlerServices({
   loggers,
   mysqlDatabase,
   context,
+  time,
   custom = {}
 } = {}) {
   if (custom === null || typeof custom !== "object" || Array.isArray(custom)) {
@@ -15,13 +16,18 @@ export function createHandlerServices({
     throw new TypeError("Handler services require a request context service");
   }
 
+  if (!time || typeof time.timestamp !== "function") {
+    throw new TypeError("Handler services require a time service");
+  }
+
   return new ServiceContainer({
     values: {
       ...custom,
       logger,
       loggers,
       mysqldatabase: mysqlDatabase,
-      context
+      context,
+      time
     }
   });
 }

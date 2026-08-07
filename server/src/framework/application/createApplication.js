@@ -139,6 +139,7 @@ class Application {
     requestLimiter,
     authStrategies,
     idempotencyManager,
+    time,
     forceExit
   }) {
     this.app = app;
@@ -150,6 +151,7 @@ class Application {
     this.requestLimiter = requestLimiter;
     this.authStrategies = authStrategies;
     this.idempotencyManager = idempotencyManager;
+    this.time = time;
     this.forceExit = forceExit;
     this.server = null;
     this.state = "created";
@@ -162,7 +164,7 @@ class Application {
     }
 
     this.state = "starting";
-    const startupTime = new Date().toISOString();
+    const startupTime = this.time.timestamp();
     const { application } = this.configuration;
 
     await this.logger.info("application.starting", "API application is starting", {
@@ -189,7 +191,7 @@ class Application {
 
     await this.logger.info("application.started", "API application started", {
       startupTime,
-      startedTime: new Date().toISOString(),
+      startedTime: this.time.timestamp(),
       url
     });
 
@@ -208,9 +210,9 @@ class Application {
   async performShutdown(reason, requestedExitCode) {
     this.state = "shutting_down";
     const timeoutMs = this.configuration.application.shutdownTimeoutMs;
-    const shutdownStartedAt = new Date().toISOString();
-    const deadline = Date.now() + timeoutMs;
-    const remainingTime = () => Math.max(1, deadline - Date.now());
+    const shutdownStartedAt = this.time.timestamp();
+    const deadline = this.time.nowMs() + timeoutMs;
+    const remainingTime = () => Math.max(1, deadline - this.time.nowMs());
     const forcedExit = setTimeout(() => {
       console.error(`Graceful shutdown exceeded ${timeoutMs}ms`);
       this.forceExit(1);
@@ -259,7 +261,7 @@ class Application {
       {
         reason,
         shutdownStartedAt,
-        shutdownCompletedAt: new Date().toISOString(),
+        shutdownCompletedAt: this.time.timestamp(),
         rejectedQueuedRequests,
         activeRequestsDrained,
         httpServerClosed,
@@ -393,6 +395,7 @@ export async function createApplication({
   const activeLoggerRegistry = logging.loggers;
   const activeRequestLogger = logging.requestMiddleware;
   const context = services.require("context");
+  const time = services.require("time");
   let activeStrategies = strategies;
 
   try {
@@ -430,6 +433,7 @@ export async function createApplication({
       new RequestLimiter({
         config: configuration.request.limits,
         logger: activeLogger,
+        time,
         store: rateLimitStore
       });
 
@@ -495,6 +499,7 @@ export async function createApplication({
       responseValidator: activeResponseValidator,
       context,
       logger: activeLogger,
+      time,
       defaultRequestTimeoutMs: configuration.application.requestTimeoutMs
     });
     const app = express();
@@ -526,7 +531,7 @@ export async function createApplication({
     app.use(cors(createCorsOptions(security)));
     app.use(express.json({ limit: security.jsonBodyLimit }));
     app.use(apiDispatcher);
-    app.use(createErrorHandler({ logger: activeLogger }));
+    app.use(createErrorHandler({ logger: activeLogger, time }));
 
     void activeLogger.info(
       "configuration.validated",
@@ -576,6 +581,7 @@ export async function createApplication({
       requestLimiter: activeRequestLimiter,
       authStrategies: activeStrategies,
       idempotencyManager: activeIdempotencyManager,
+      time,
       forceExit
     });
   } catch (error) {

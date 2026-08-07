@@ -92,10 +92,15 @@ export class BaseRequestHandler {
     this.loggers = this.logging?.loggers || optionalService(services, "loggers") || null;
     this.mysqlDatabase = optionalService(services, "mysqldatabase") || null;
     this.context = optionalService(services, "context") || null;
+    this.time = optionalService(services, "time") || null;
   }
 
   async handle(req, res, next) {
-    const startTime = new Date();
+    if (!this.time || typeof this.time.now !== "function" || typeof this.time.timestamp !== "function") {
+      throw new TypeError("Request handler requires a time service");
+    }
+
+    const startTime = this.time.now();
     const startedAt = process.hrtime.bigint();
     const requestId =
       req.requestId ||
@@ -112,7 +117,7 @@ export class BaseRequestHandler {
         handler: this.handlerName,
         method: req.method,
         url: req.originalUrl || req.url,
-        startTime: startTime.toISOString()
+        startTime: this.time.timestamp(startTime)
       }
     );
 
@@ -159,7 +164,8 @@ export class BaseRequestHandler {
 
       sendSuccess(res, response.data, {
         statusCode: response.statusCode,
-        meta: response.meta
+        meta: response.meta,
+        time: this.time
       });
 
       return result;
@@ -167,7 +173,7 @@ export class BaseRequestHandler {
       handlerError = error;
       throw error;
     } finally {
-      const endTime = new Date();
+      const endTime = this.time.now();
       const durationNs = process.hrtime.bigint() - startedAt;
       const requestTimedOut =
         req.requestTimeout?.signal?.aborted &&
@@ -177,8 +183,8 @@ export class BaseRequestHandler {
         handler: this.handlerName,
         method: req.method,
         url: req.originalUrl || req.url,
-        startTime: startTime.toISOString(),
-        endTime: endTime.toISOString(),
+        startTime: this.time.timestamp(startTime),
+        endTime: this.time.timestamp(endTime),
         durationMs: Number(durationNs) / 1_000_000,
         responseCode: res.statusCode,
         outcome: handlerError ? "failed" : requestTimedOut ? "timed_out" : "completed"

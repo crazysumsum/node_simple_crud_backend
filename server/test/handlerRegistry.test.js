@@ -4,6 +4,7 @@ import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createHandlerRegistry } from "../src/framework/api/handlerRegistry.js";
 import { createHandlerServices } from "../src/framework/api/createHandlerServices.js";
 import { RequestContextService } from "../src/services/context/RequestContextService.js";
+import { createTestTime, servicesWithTime } from "../test-support/createTestTime.js";
 
 const silentLogger = {
   info: async () => {},
@@ -13,13 +14,15 @@ const silentLogger = {
 test("handler discovery registers classes and injects the shared service container", async () => {
   const mysqlDatabase = { query: async () => [] };
   const loggers = { get: () => null };
-  const context = new RequestContextService();
+  const time = createTestTime();
+  const context = new RequestContextService({ services: servicesWithTime(time) });
   const inventory = { reserve: async () => true };
   const services = createHandlerServices({
     logger: silentLogger,
     loggers,
     mysqlDatabase,
     context,
+    time,
     custom: { inventory }
   });
 

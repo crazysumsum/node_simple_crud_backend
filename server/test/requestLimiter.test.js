@@ -7,6 +7,7 @@ import {
   markRequestProcessingStarted
 } from "../src/framework/http/requestProcessingLifecycle.js";
 import { RequestLimiter } from "../src/framework/middleware/requestLimiter.js";
+import { createTestTime } from "../test-support/createTestTime.js";
 
 const baseConfig = {
   enabled: true,
@@ -83,7 +84,8 @@ function memoryLogger() {
 test("request limiter processes queued requests in FIFO order and rejects a full queue", async () => {
   let now = 1000;
   const logger = memoryLogger();
-  const limiter = new RequestLimiter({ config: baseConfig, logger, now: () => now });
+  const time = createTestTime({ clock: () => new Date(now) });
+  const limiter = new RequestLimiter({ config: baseConfig, logger, time });
   const started = [];
   const firstResponse = new MockResponse();
   const secondResponse = new MockResponse();
@@ -120,6 +122,7 @@ test("request limiter processes queued requests in FIFO order and rejects a full
 test("request limiter rejects an IP that exceeds the sliding window", async () => {
   let now = 0;
   const logger = memoryLogger();
+  const time = createTestTime({ clock: () => new Date(now) });
   const limiter = new RequestLimiter({
     config: {
       ...baseConfig,
@@ -127,7 +130,7 @@ test("request limiter rejects an IP that exceeds the sliding window", async () =
       maxRequestsPerIpPerWindow: 2
     },
     logger,
-    now: () => now
+    time
   });
 
   for (const id of ["one", "two"]) {
@@ -159,9 +162,11 @@ test("request limiter rejects an IP that exceeds the sliding window", async () =
 
 test("request limiter rejects a queued request after its wait timeout", async () => {
   const logger = memoryLogger();
+  const time = createTestTime();
   const limiter = new RequestLimiter({
     config: { ...baseConfig, queueTimeoutMs: 10 },
-    logger
+    logger,
+    time
   });
   const activeResponse = new MockResponse();
   const queuedResponse = new MockResponse();
@@ -184,7 +189,7 @@ test("request limiter rejects a queued request after its wait timeout", async ()
 
 test("request limiter rejects queued and new requests during graceful shutdown", async () => {
   const logger = memoryLogger();
-  const limiter = new RequestLimiter({ config: baseConfig, logger });
+  const limiter = new RequestLimiter({ config: baseConfig, logger, time: createTestTime() });
   const activeResponse = new MockResponse();
   const queuedResponse = new MockResponse();
 
@@ -211,7 +216,8 @@ test("request limiter rejects queued and new requests during graceful shutdown",
 
 test("request limiter instances share IP quotas through an injected store", async () => {
   let now = 5000;
-  const store = new MemoryRateLimitStore({ now: () => now });
+  const time = createTestTime({ clock: () => new Date(now) });
+  const store = new MemoryRateLimitStore({ now: () => time.nowMs() });
   const config = {
     ...baseConfig,
     maxConcurrentRequests: 10,
@@ -220,13 +226,13 @@ test("request limiter instances share IP quotas through an injected store", asyn
   const firstInstance = new RequestLimiter({
     config,
     logger: memoryLogger(),
-    now: () => now,
+    time,
     store
   });
   const secondInstance = new RequestLimiter({
     config,
     logger: memoryLogger(),
-    now: () => now,
+    time,
     store
   });
 
@@ -249,7 +255,11 @@ test("request limiter instances share IP quotas through an injected store", asyn
 });
 
 test("request limiter keeps a slot until timed-out processing actually completes", async () => {
-  const limiter = new RequestLimiter({ config: baseConfig, logger: memoryLogger() });
+  const limiter = new RequestLimiter({
+    config: baseConfig,
+    logger: memoryLogger(),
+    time: createTestTime()
+  });
   const firstRequest = request("long-running");
   const firstResponse = new MockResponse();
   const secondResponse = new MockResponse();

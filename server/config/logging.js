@@ -20,9 +20,6 @@ const loggingConfig = {
       // 執行過期日誌檢查的最短間隔，單位為小時。
       cleanupIntervalHours: 24,
 
-      // 日誌 timestamp 及檔名日期採用的 IANA 時區；timestamp 會包含 UTC offset。
-      timeZone: "Asia/Hong_Kong",
-
       // 每個日誌檔案最大容量，單位為 bytes；超過前會建立同日流水號檔案。
       maxFileSizeBytes: 10485760,
 
@@ -48,7 +45,8 @@ const loggingConfig = {
       // 是否啟用後台系統運行日誌。false 時不建立或寫入日誌檔案。
       enabled: true,
 
-      // System log 儲存目錄。相對路徑以 server 目錄為基準。
+      // System log 儲存目錄。相對路徑以 server 目錄為基準；timestamp 及檔名
+      // 日期一律使用 application.timeZone。
       directory: "logs/system",
 
       // 每日 system log 檔案前綴；輪替後會加入 -001、-002 等流水號。
@@ -59,9 +57,6 @@ const loggingConfig = {
 
       // 執行過期檔案清理的最短間隔，單位為小時。
       cleanupIntervalHours: 24,
-
-      // 日誌 timestamp 及檔名日期使用的 IANA 時區；timestamp 會包含 UTC offset。
-      timeZone: "Asia/Hong_Kong",
 
       // 每個 system log 檔案最大容量，單位為 bytes。
       maxFileSizeBytes: 10485760,

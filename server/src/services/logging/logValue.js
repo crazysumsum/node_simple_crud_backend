@@ -1,5 +1,11 @@
 // Converts arbitrary log values into safe JSON-compatible values.
-export function redactValue(value, sensitiveFields, seen = new WeakSet(), depth = 0) {
+export function redactValue(
+  value,
+  sensitiveFields,
+  formatDate,
+  seen = new WeakSet(),
+  depth = 0
+) {
   if (value === null || value === undefined) {
     return value ?? null;
   }
@@ -17,7 +23,7 @@ export function redactValue(value, sensitiveFields, seen = new WeakSet(), depth 
   }
 
   if (value instanceof Date) {
-    return value.toISOString();
+    return formatDate(value);
   }
 
   if (typeof value !== "object") {
@@ -35,7 +41,9 @@ export function redactValue(value, sensitiveFields, seen = new WeakSet(), depth 
   seen.add(value);
 
   if (Array.isArray(value)) {
-    return value.map((item) => redactValue(item, sensitiveFields, seen, depth + 1));
+    return value.map((item) =>
+      redactValue(item, sensitiveFields, formatDate, seen, depth + 1)
+    );
   }
 
   return Object.fromEntries(
@@ -43,7 +51,7 @@ export function redactValue(value, sensitiveFields, seen = new WeakSet(), depth 
       key,
       sensitiveFields.has(key.toLowerCase())
         ? "[REDACTED]"
-        : redactValue(item, sensitiveFields, seen, depth + 1)
+        : redactValue(item, sensitiveFields, formatDate, seen, depth + 1)
     ])
   );
 }

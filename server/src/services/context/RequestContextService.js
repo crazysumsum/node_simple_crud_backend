@@ -5,22 +5,24 @@ export class RequestContextService extends BaseService {
   static service = Object.freeze({
     name: "context",
     lifecycle: "singleton",
-    dependencies: [],
+    dependencies: ["time"],
     eager: true
   });
 
   constructor({ config, services, options = {} } = {}) {
     super({ config, services, options });
     this.storage = options.storage || new AsyncLocalStorage();
+    this.time = services.require("time");
   }
 
   createMiddleware() {
     const storage = this.storage;
+    const time = this.time;
 
     return function requestContext(req, _res, next) {
       const context = {
         requestId: req.requestId || null,
-        startedAt: new Date().toISOString(),
+        startedAt: time.timestamp(),
         method: req.method,
         url: req.originalUrl || req.url,
         clientIp: req.ip || req.socket?.remoteAddress || null,

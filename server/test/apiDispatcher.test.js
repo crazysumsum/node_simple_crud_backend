@@ -12,6 +12,10 @@ import { issueAccessToken } from "../src/framework/auth/jwtService.js";
 import { RequestContextService } from "../src/services/context/RequestContextService.js";
 import { createApiDispatcher as createDispatcher } from "../src/framework/middleware/apiDispatcher.js";
 import { createErrorHandler } from "../src/framework/middleware/errorHandler.js";
+import {
+  createTestTime,
+  servicesWithTime
+} from "../test-support/createTestTime.js";
 
 const silentLogger = {
   debug: async () => {},
@@ -21,7 +25,8 @@ const silentLogger = {
 };
 const emptyRequestSchema = {};
 const anySuccessResponseSchema = { 200: {} };
-const requestContext = new RequestContextService();
+const time = createTestTime();
+const requestContext = new RequestContextService({ services: servicesWithTime(time) });
 const defaultAuthStrategies = await createAuthStrategyRegistry();
 const apiRouteDefaults = {
   version: "v1",
@@ -39,13 +44,14 @@ function createApiDispatcher(options = {}) {
   return createDispatcher({
     strategies: defaultAuthStrategies,
     context: requestContext,
+    time,
     ...options
   });
 }
 
 class TestHandler extends BaseRequestHandler {
   constructor(name, callback, logger = silentLogger) {
-    super(name, { logger });
+    super(name, { logger, time });
     this.callback = callback;
   }
 
@@ -63,7 +69,7 @@ async function startTestServer(t, dispatcher, errorLogger = silentLogger) {
   });
   app.use(requestContext.createMiddleware());
   app.use(dispatcher);
-  app.use(createErrorHandler({ logger: errorLogger }));
+  app.use(createErrorHandler({ logger: errorLogger, time }));
 
   const server = createServer(app);
   await new Promise((resolve, reject) => {

@@ -7,6 +7,7 @@ import test from "node:test";
 import { FileLogWriter } from "../src/services/logging/fileLogWriter.js";
 import { Logger } from "../src/services/logging/Logger.js";
 import { createRequestLogger } from "../src/framework/middleware/requestLogger.js";
+import { createTestTime } from "../test-support/createTestTime.js";
 
 const baseConfig = {
   enabled: true,
@@ -14,10 +15,10 @@ const baseConfig = {
   filePrefix: "requests",
   retentionDays: 30,
   cleanupIntervalHours: 24,
-  timeZone: "Asia/Hong_Kong",
   maxFileSizeBytes: 10485760,
   redactedFields: ["password", "token"]
 };
+const time = createTestTime();
 
 class MockResponse extends EventEmitter {
   constructor() {
@@ -68,9 +69,10 @@ test("request logger captures metadata and redacts sensitive fields", async () =
   const logger = new Logger({
     name: "request",
     config: baseConfig,
+    time,
     writer
   });
-  const middleware = createRequestLogger({ logger });
+  const middleware = createRequestLogger({ logger, time });
   const req = {
     method: "POST",
     originalUrl: "/api/users?active=true",
@@ -121,9 +123,10 @@ test("request logger redacts sensitive query values in the logged URL", async ()
   const logger = new Logger({
     name: "request",
     config: baseConfig,
+    time,
     writer: { write: async (entry) => resolveEntry(entry) }
   });
-  const middleware = createRequestLogger({ logger });
+  const middleware = createRequestLogger({ logger, time });
   const req = {
     method: "GET",
     originalUrl: "/api/users?token=url-secret&active=true",
@@ -153,9 +156,10 @@ test("request logger records client disconnects with the shared log contract", a
   const logger = new Logger({
     name: "request",
     config: baseConfig,
+    time,
     writer: { write: async (entry) => resolveEntry(entry) }
   });
-  const middleware = createRequestLogger({ logger });
+  const middleware = createRequestLogger({ logger, time });
   const req = {
     method: "GET",
     originalUrl: "/api/slow",
@@ -184,16 +188,19 @@ test("file writer appends JSONL and removes expired log files", async (t) => {
 
   const oldFile = path.join(directory, "requests-2020-01-01.log");
   await writeFile(oldFile, "old\n", "utf8");
-  const oldDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+  const oldDate = time.at(time.nowMs() - 10 * 24 * 60 * 60 * 1000);
   await utimes(oldFile, oldDate, oldDate);
 
   const writer = new FileLogWriter({
-    ...baseConfig,
-    directory,
-    retentionDays: 2
+    config: {
+      ...baseConfig,
+      directory,
+      retentionDays: 2
+    },
+    time
   });
   const entry = {
-    timestamp: new Date().toISOString(),
+    timestamp: time.timestamp(),
     level: "info",
     event: "http.request.completed",
     message: "HTTP request completed",
@@ -218,7 +225,7 @@ test("file writer rotates logs before the size limit is exceeded", async (t) => 
   });
 
   const entry = {
-    timestamp: new Date().toISOString(),
+    timestamp: time.timestamp(),
     level: "info",
     event: "http.request.completed",
     message: "HTTP request completed",
@@ -230,9 +237,12 @@ test("file writer rotates logs before the size limit is exceeded", async (t) => 
   };
   const lineSize = Buffer.byteLength(`${JSON.stringify(entry)}\n`, "utf8");
   const writer = new FileLogWriter({
-    ...baseConfig,
-    directory,
-    maxFileSizeBytes: lineSize + 10
+    config: {
+      ...baseConfig,
+      directory,
+      maxFileSizeBytes: lineSize + 10
+    },
+    time
   });
 
   await writer.write(entry);

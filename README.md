@@ -8,6 +8,10 @@ Node.js + MySQL + Vue 3 development environment.
 - npm 10+
 - MySQL 5.7+ or Docker Desktop
 
+Set `APP_TIME_ZONE` once for the whole application; the default is `Asia/Hong_Kong`.
+All application timestamps, API response metadata, request context, handler events and
+log file dates use this IANA time zone through the injected `time` service.
+
 ## Setup
 
 1. Install dependencies:
@@ -96,12 +100,13 @@ with an inline comment in that file. Common logger settings include:
 - `filePrefix`: daily log file prefix
 - `retentionDays`: number of days to retain log files
 - `cleanupIntervalHours`: expired-log cleanup frequency
-- `timeZone`: IANA time zone used for timestamps and daily file names
 - `maxFileSizeBytes`: maximum size of each log file before a numbered file is created
 - `minimumLevel`: lowest level written by the generic logger
 - `redactedFields`: field names that are replaced with `[REDACTED]`
 
-Configuration changes require an API restart.
+The logger profiles do not define a time zone. `application.timeZone` is the single
+source of truth for every profile and every system-generated timestamp. Configuration
+changes require an API restart.
 
 ## System Logs
 
@@ -395,6 +400,16 @@ const { params, query, body, headers } = req.input;
 
 This object always has the same four locations. Values may contain the type
 coercion and defaults declared by the API schema.
+
+## System Time Service
+
+`server/src/services/time/SystemTimeService.js` is automatically discovered as the
+singleton `time` service. It is the sole current-time source for framework services,
+handlers, responses and logs. Use `this.services.require("time")` in a handler or
+service, then call `time.timestamp()` for an offset-bearing application timestamp,
+`time.now()` for a `Date`, `time.nowMs()` for elapsed-time calculations, and
+`time.fileDate()` for daily file names. The configured `application.timeZone` applies
+to all formatted values.
 
 ## Response Validation
 

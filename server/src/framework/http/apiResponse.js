@@ -1,8 +1,12 @@
-function responseMeta(res, additionalMeta = {}) {
+function responseMeta(res, additionalMeta = {}, time) {
+  if (!time || typeof time.timestamp !== "function") {
+    throw new TypeError("API response requires a time service");
+  }
+
   return {
     requestId:
       res.req?.requestId || res.getHeader?.("x-request-id") || null,
-    timestamp: new Date().toISOString(),
+    timestamp: time.timestamp(),
     ...additionalMeta
   };
 }
@@ -10,12 +14,12 @@ function responseMeta(res, additionalMeta = {}) {
 export function sendSuccess(
   res,
   data,
-  { statusCode = 200, meta = {} } = {}
+  { statusCode = 200, meta = {}, time } = {}
 ) {
   return res.status(statusCode).json({
     success: true,
     data: data ?? null,
-    meta: responseMeta(res, meta)
+    meta: responseMeta(res, meta, time)
   });
 }
 
@@ -26,7 +30,8 @@ export function sendError(
     code = "INTERNAL_SERVER_ERROR",
     message = "Internal server error",
     details,
-    meta = {}
+    meta = {},
+    time
   } = {}
 ) {
   const error = { code, message };
@@ -38,6 +43,6 @@ export function sendError(
   return res.status(statusCode).json({
     success: false,
     error,
-    meta: responseMeta(res, meta)
+    meta: responseMeta(res, meta, time)
   });
 }

@@ -14,7 +14,8 @@ export class RequestTimeoutError extends ApplicationError {
 export function createRequestTimeoutMiddleware({
   timeoutMs,
   logger,
-  context
+  context,
+  time
 } = {}) {
   const normalizedTimeoutMs = Number(timeoutMs);
 
@@ -30,19 +31,23 @@ export function createRequestTimeoutMiddleware({
     throw new TypeError("Request timeout middleware requires a request context service");
   }
 
+  if (!time || typeof time.nowMs !== "function" || typeof time.at !== "function" || typeof time.timestamp !== "function") {
+    throw new TypeError("Request timeout middleware requires a time service");
+  }
+
   return function requestTimeout(req, res, next) {
     const controller = new AbortController();
-    const startedAt = Date.now();
-    const deadline = new Date(startedAt + normalizedTimeoutMs);
+    const startedAt = time.nowMs();
+    const deadline = time.timestamp(time.at(startedAt + normalizedTimeoutMs));
     let timer;
 
     req.requestTimeout = Object.freeze({
       timeoutMs: normalizedTimeoutMs,
-      deadline: deadline.toISOString(),
+      deadline,
       signal: controller.signal
     });
     const contextValues = {
-      deadline: deadline.toISOString(),
+      deadline,
       signal: controller.signal
     };
     context.update(contextValues);
@@ -79,13 +84,14 @@ export function createRequestTimeoutMiddleware({
         url: req.originalUrl || req.url,
         api: req.apiRoute || null,
         timeoutMs: normalizedTimeoutMs,
-        elapsedMs: Date.now() - startedAt
+        elapsedMs: time.nowMs() - startedAt
       });
 
       sendError(res, {
         statusCode: error.statusCode,
         code: error.publicCode,
-        message: error.publicMessage
+        message: error.publicMessage,
+        time
       });
     }, normalizedTimeoutMs);
     timer.unref?.();

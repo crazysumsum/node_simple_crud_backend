@@ -3,6 +3,7 @@ import test from "node:test";
 import { LoggerRegistry } from "../src/services/logging/LoggerRegistry.js";
 import { Logger } from "../src/services/logging/Logger.js";
 import { LoggingService } from "../src/services/logging/LoggingService.js";
+import { createTestTime, servicesWithTime } from "../test-support/createTestTime.js";
 
 const loggerConfig = {
   enabled: true,
@@ -10,16 +11,17 @@ const loggerConfig = {
   filePrefix: "test",
   retentionDays: 1,
   cleanupIntervalHours: 1,
-  timeZone: "UTC",
   maxFileSizeBytes: 1024,
   redactedFields: ["password"]
 };
+const time = createTestTime();
 
 test("generic logger sanitizes entries before delegating to its writer", async () => {
   const entries = [];
   const logger = new Logger({
     name: "test",
     config: loggerConfig,
+    time,
     writer: {
       write: async (entry) => entries.push(entry),
       flush: async () => {}
@@ -51,6 +53,7 @@ test("generic logger rejects profile-specific top-level fields", async () => {
   const logger = new Logger({
     name: "test",
     config: loggerConfig,
+    time,
     writer: { write: async () => {} }
   });
 
@@ -60,11 +63,12 @@ test("generic logger rejects profile-specific top-level fields", async () => {
   );
 });
 
-test("generic logger formats timestamps in its configured time zone", async () => {
+test("generic logger formats timestamps in the application time zone", async () => {
   const entries = [];
   const logger = new Logger({
     name: "hong-kong",
-    config: { ...loggerConfig, timeZone: "Asia/Hong_Kong" },
+    config: loggerConfig,
+    time: createTestTime({ timeZone: "Asia/Hong_Kong" }),
     writer: { write: async (entry) => entries.push(entry) }
   });
 
@@ -108,6 +112,7 @@ test("generic logger filters entries below its configured minimum level", async 
       filePrefix: "security",
       minimumLevel: "warn"
     },
+    time,
     writer: {
       write: async (entry) => entries.push(entry),
       flush: async () => {}
@@ -151,6 +156,7 @@ test("logging service flushes registry loggers once and separately flushes an in
   const defaultFlushes = { request: 0, system: 0 };
   const defaultService = new LoggingService({
     config: { logging: { loggers: {} } },
+    services: servicesWithTime(time),
     options: { loggerRegistry: createRegistry(defaultFlushes) }
   });
 
@@ -161,6 +167,7 @@ test("logging service flushes registry loggers once and separately flushes an in
   let injectedLoggerFlushes = 0;
   const injectedService = new LoggingService({
     config: { logging: { loggers: {} } },
+    services: servicesWithTime(time),
     options: {
       logger: {
         flush: async () => {

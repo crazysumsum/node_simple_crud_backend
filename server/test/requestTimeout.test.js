@@ -5,6 +5,7 @@ import express from "express";
 import { sendSuccess } from "../src/framework/http/apiResponse.js";
 import { createRequestTimeoutMiddleware } from "../src/framework/middleware/requestTimeout.js";
 import { RequestContextService } from "../src/services/context/RequestContextService.js";
+import { createTestTime, servicesWithTime } from "../test-support/createTestTime.js";
 
 async function startServer(t, app) {
   const server = createServer(app);
@@ -29,7 +30,8 @@ test("request timeout returns the standard 504 response and aborts req.requestTi
     }
   };
   const app = express();
-  const context = new RequestContextService();
+  const time = createTestTime();
+  const context = new RequestContextService({ services: servicesWithTime(time) });
   let requestSignal;
 
   app.use((req, res, next) => {
@@ -40,13 +42,13 @@ test("request timeout returns the standard 504 response and aborts req.requestTi
   app.use(context.createMiddleware());
   app.get(
     "/api/slow",
-    createRequestTimeoutMiddleware({ timeoutMs: 20, logger, context }),
+    createRequestTimeoutMiddleware({ timeoutMs: 20, logger, context, time }),
     async (req, res) => {
       requestSignal = req.requestTimeout.signal;
       await new Promise((resolve) => setTimeout(resolve, 60));
 
       if (!res.headersSent) {
-        sendSuccess(res, { completed: true });
+        sendSuccess(res, { completed: true }, { time });
       }
     }
   );

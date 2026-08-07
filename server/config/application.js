@@ -6,6 +6,10 @@ const applicationConfig = {
   // Express HTTP server 監聽連接埠。0 只應用於自動測試，由作業系統分配臨時 port。
   port: Number(process.env.APP_PORT || 3000),
 
+  // 全系統唯一的 IANA 時區來源。所有日誌、API timestamp 與應用程式時間服務
+  // 都會使用此設定，避免不同元件各自採用 UTC 或不同時區。
+  timeZone: process.env.APP_TIME_ZONE || "Asia/Hong_Kong",
+
   // API 已離開限流隊列、開始 authentication/validation/handler 後的最長處理時間，
   // 單位為毫秒。單一 API 可在 Handler 的 static api.timeoutMs 覆蓋此預設值。
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),

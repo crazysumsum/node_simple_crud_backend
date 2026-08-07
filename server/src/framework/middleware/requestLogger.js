@@ -62,7 +62,7 @@ function redactUrl(url, isSensitiveField) {
  * 建立請求日誌中間件。中間件只收集 request／response 資料並產生日誌事件，
  * 寫入、遮蔽及 flush 由注入的通用 Logger 負責。
  */
-export function createRequestLogger({ logger } = {}) {
+export function createRequestLogger({ logger, time } = {}) {
   if (!logger || typeof logger.write !== "function") {
     throw new TypeError("Request logger middleware requires a Logger");
   }
@@ -75,8 +75,12 @@ export function createRequestLogger({ logger } = {}) {
     throw new TypeError("Request logger middleware requires timestamp formatting");
   }
 
+  if (!time || typeof time.now !== "function" || typeof time.timestamp !== "function") {
+    throw new TypeError("Request logger middleware requires a time service");
+  }
+
   const middleware = function requestLogger(req, res, next) {
-    const requestTimestamp = new Date();
+    const requestTimestamp = time.now();
     // hrtime 使用單調時鐘，計算回應時間時不會受系統時間校正影響。
     const startedAt = process.hrtime.bigint();
     const requestId = requestIdFrom(req);
@@ -113,10 +117,10 @@ export function createRequestLogger({ logger } = {}) {
       logged = true;
       const durationNs = process.hrtime.bigint() - startedAt;
       const responseContentType = res.getHeader("content-type");
-      const responseTime = new Date();
+      const responseTime = time.now();
       const completed = completion === "finished";
       const entry = {
-        timestamp: logger.formatTimestamp(responseTime),
+        timestamp: time.timestamp(responseTime),
         level: completed ? "info" : "warn",
         event: completed
           ? "http.request.completed"
@@ -126,8 +130,8 @@ export function createRequestLogger({ logger } = {}) {
           : "HTTP request ended before completion",
         context: {
           requestId,
-          requestTime: logger.formatTimestamp(requestTimestamp),
-          responseTime: logger.formatTimestamp(responseTime),
+          requestTime: time.timestamp(requestTimestamp),
+          responseTime: time.timestamp(responseTime),
           durationMs: Number(durationNs) / 1_000_000,
           method: req.method,
           url: redactUrl(

@@ -21,13 +21,12 @@ export class RequestLimiter {
   constructor({
     config = requestConfig.limits,
     logger,
-    now = Date.now,
+    time,
     store
   } = {}) {
     this.config = normalizeRequestLimitsConfig(config);
     this.logger = logger;
-    this.now = now;
-    this.store = store || new MemoryRateLimitStore({ now });
+    this.time = time;
 
     if (
       !logger ||
@@ -37,6 +36,12 @@ export class RequestLimiter {
     ) {
       throw new TypeError("RequestLimiter requires a system logger");
     }
+
+    if (!time || typeof time.nowMs !== "function" || typeof time.timestamp !== "function") {
+      throw new TypeError("RequestLimiter requires a time service");
+    }
+
+    this.store = store || new MemoryRateLimitStore({ now: () => time.nowMs() });
 
     if (
       !(this.store instanceof RateLimitStore) &&
@@ -161,7 +166,7 @@ export class RequestLimiter {
   }
 
   enqueue(ticket) {
-    ticket.queuedAt = this.now();
+    ticket.queuedAt = this.time.nowMs();
     ticket.closeListener = () => this.cancelQueuedTicket(ticket, "client_disconnected");
     ticket.res.once("close", ticket.closeListener);
     ticket.timeout = setTimeout(() => {
@@ -233,7 +238,9 @@ export class RequestLimiter {
   }
 
   start(ticket) {
-    const queueWaitMs = ticket.queuedAt === null ? 0 : this.now() - ticket.queuedAt;
+    const queueWaitMs = ticket.queuedAt === null
+      ? 0
+      : this.time.nowMs() - ticket.queuedAt;
     this.clearQueuedTicket(ticket);
     this.activeRequests += 1;
     let released = false;
@@ -301,7 +308,8 @@ export class RequestLimiter {
     sendError(res, {
       statusCode: 429,
       code: TOO_MANY_REQUESTS,
-      message: TOO_MANY_REQUESTS
+      message: TOO_MANY_REQUESTS,
+      time: this.time
     });
   }
 
@@ -313,7 +321,8 @@ export class RequestLimiter {
     sendError(res, {
       statusCode: 503,
       code: "SERVICE_UNAVAILABLE",
-      message: "Service unavailable"
+      message: "Service unavailable",
+      time: this.time
     });
   }
 

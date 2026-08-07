@@ -124,6 +124,7 @@ export function createApiDispatcher({
   idempotencyManager,
   context,
   logger,
+  time,
   defaultRequestTimeoutMs = Number(applicationConfig.requestTimeoutMs)
 } = {}) {
   if (
@@ -153,6 +154,10 @@ export function createApiDispatcher({
 
   if (!context || typeof context.update !== "function") {
     throw new TypeError("API dispatcher requires a request context service");
+  }
+
+  if (!time || typeof time.timestamp !== "function") {
+    throw new TypeError("API dispatcher requires a time service");
   }
 
   const activeIdempotencyManager =
@@ -231,7 +236,8 @@ export function createApiDispatcher({
       createRequestTimeoutMiddleware({
         timeoutMs,
         logger: activeLogger,
-        context
+        context,
+        time
       }),
       async (req, res, next) => {
         markRequestProcessingStarted(req);
@@ -280,7 +286,8 @@ export function createApiDispatcher({
     sendError(res, {
       statusCode: 401,
       code: "Unauthorized Access",
-      message: "Unauthorized Access"
+      message: "Unauthorized Access",
+      time
     });
   });
 

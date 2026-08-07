@@ -15,7 +15,6 @@ export class SystemLogger {
     }
 
     const entry = {
-      timestamp: new Date().toISOString(),
       level: normalizedLevel,
       event: String(event || "system.event"),
       message: String(message || ""),

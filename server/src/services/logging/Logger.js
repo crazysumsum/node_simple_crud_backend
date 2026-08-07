@@ -1,5 +1,4 @@
 import { FileLogWriter } from "./fileLogWriter.js";
-import { formatLogTimestamp } from "./logTimestamp.js";
 import { redactValue } from "./logValue.js";
 import {
   LOG_LEVELS,
@@ -15,11 +14,17 @@ const ENTRY_FIELDS = new Set([
 ]);
 
 export class Logger {
-  constructor({ name, config, writer } = {}) {
+  constructor({ name, config, writer, time } = {}) {
     this.name = String(name || "logger");
     this.config = normalizeLoggerConfig(config, this.name);
+    this.time = time;
+
+    if (!time || typeof time.timestamp !== "function" || typeof time.fileDate !== "function") {
+      throw new TypeError("Logger requires a time service");
+    }
+
     this.writer =
-      writer || (this.config.enabled ? new FileLogWriter(this.config) : null);
+      writer || (this.config.enabled ? new FileLogWriter({ config: this.config, time }) : null);
     this.sensitiveFields = new Set(
       this.config.redactedFields.map((field) => field.toLowerCase())
     );
@@ -34,11 +39,11 @@ export class Logger {
   }
 
   sanitize(value) {
-    return redactValue(value, this.sensitiveFields);
+    return redactValue(value, this.sensitiveFields, (date) => this.time.timestamp(date));
   }
 
-  formatTimestamp(value = new Date()) {
-    return formatLogTimestamp(value, this.config.timeZone);
+  formatTimestamp(value) {
+    return this.time.timestamp(value);
   }
 
   async write(entry) {
@@ -73,7 +78,7 @@ export class Logger {
       return;
     }
 
-    const timestamp = this.formatTimestamp(entry.timestamp || new Date());
+    const timestamp = this.formatTimestamp(entry.timestamp);
 
     const context = entry.context ?? {};
 

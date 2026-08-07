@@ -5,18 +5,6 @@ import path from "node:path";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
-function dateForFile(date, timeZone) {
-  const parts = new Intl.DateTimeFormat("en", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(date);
-  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
-
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
 function rotationIndex(fileName, baseName) {
   if (fileName === `${baseName}.log`) {
     return 0;
@@ -37,8 +25,14 @@ function rotatedFileName(baseName, index) {
 }
 
 export class FileLogWriter {
-  constructor(config) {
+  constructor({ config, time } = {}) {
     this.config = config;
+    this.time = time;
+
+    if (!time || typeof time.nowMs !== "function" || typeof time.fileDate !== "function") {
+      throw new TypeError("File log writer requires a time service");
+    }
+
     this.lastCleanupAt = 0;
     this.queue = Promise.resolve();
     this.ready = mkdir(config.directory, { recursive: true }).then(() => this.cleanup());
@@ -51,11 +45,11 @@ export class FileLogWriter {
 
       const entryTimestamp = entry.timestamp;
 
-      if (!entryTimestamp || Number.isNaN(new Date(entryTimestamp).getTime())) {
+      if (!entryTimestamp) {
         throw new Error("Log entry must contain a valid timestamp");
       }
 
-      const date = dateForFile(new Date(entryTimestamp), this.config.timeZone);
+      const date = this.time.fileDate(entryTimestamp);
       const content = `${JSON.stringify(entry)}\n`;
       const contentSize = Buffer.byteLength(content, "utf8");
       const filePath = await this.filePathForWrite(date, contentSize);
@@ -115,7 +109,7 @@ export class FileLogWriter {
   async cleanupIfDue() {
     const intervalMs = this.config.cleanupIntervalHours * 60 * 60 * 1000;
 
-    if (Date.now() - this.lastCleanupAt >= intervalMs) {
+    if (this.time.nowMs() - this.lastCleanupAt >= intervalMs) {
       await this.cleanup();
     }
   }
@@ -123,7 +117,7 @@ export class FileLogWriter {
   async cleanup() {
     const files = await readdir(this.config.directory);
     const prefix = `${this.config.filePrefix}-`;
-    const cutoff = Date.now() - this.config.retentionDays * DAY_IN_MS;
+    const cutoff = this.time.nowMs() - this.config.retentionDays * DAY_IN_MS;
 
     await Promise.all(
       files
@@ -138,6 +132,6 @@ export class FileLogWriter {
         })
     );
 
-    this.lastCleanupAt = Date.now();
+    this.lastCleanupAt = this.time.nowMs();
   }
 }

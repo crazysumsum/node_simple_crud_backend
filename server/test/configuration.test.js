@@ -20,6 +20,7 @@ test("global configuration validation normalizes every configuration section", (
     "request",
     "security"
   ]);
+  assert.equal(configuration.application.timeZone, "Asia/Hong_Kong");
   assert.equal(configuration.application.requestTimeoutMs, 30000);
   assert.equal(configuration.api.defaults.authType, "jwt");
   assert.equal(configuration.api.defaults.version, "v1");
@@ -111,7 +112,12 @@ test("global configuration validation reports errors from multiple sections", ()
   const source = defaultConfigurationSource();
   const invalidSource = {
     ...source,
-    application: { ...source.application, port: 70000, requestTimeoutMs: 0 },
+    application: {
+      ...source.application,
+      port: 70000,
+      timeZone: "Invalid/TimeZone",
+      requestTimeoutMs: 0
+    },
     api: {
       ...source.api,
       defaults: { ...source.api.defaults, timeoutMs: 0 }

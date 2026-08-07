@@ -69,7 +69,7 @@ export class HealthHandler extends BaseRequestHandler {
       return this.response({
         status: "ok",
         database: databaseConnected ? "connected" : "unknown",
-        timestamp: new Date().toISOString()
+        timestamp: this.time.timestamp()
       });
     } catch (error) {
       throw new ApplicationError("Database health check failed", {

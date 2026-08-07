@@ -22,15 +22,6 @@ function positiveNumber(value, fieldName) {
   return number;
 }
 
-function validateTimeZone(timeZone, fieldName) {
-  try {
-    new Intl.DateTimeFormat("en", { timeZone }).format();
-    return timeZone;
-  } catch {
-    throw new Error(`Logging config "${fieldName}" is invalid: ${timeZone}`);
-  }
-}
-
 export function normalizeLoggerConfig(source, name = "logger") {
   const profile = requirePlainObject(source, `logging.loggers.${name}`);
   const directory = path.isAbsolute(profile.directory)
@@ -62,10 +53,6 @@ export function normalizeLoggerConfig(source, name = "logger") {
     cleanupIntervalHours: positiveNumber(
       profile.cleanupIntervalHours ?? 24,
       `loggers.${name}.cleanupIntervalHours`
-    ),
-    timeZone: validateTimeZone(
-      profile.timeZone || "UTC",
-      `loggers.${name}.timeZone`
     ),
     maxFileSizeBytes: positiveNumber(
       profile.maxFileSizeBytes ?? 10485760,

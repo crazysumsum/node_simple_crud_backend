@@ -1,14 +1,14 @@
 import { Logger } from "./Logger.js";
 
 export class LoggerRegistry {
-  constructor({ configs, loggerFactory } = {}) {
+  constructor({ configs, loggerFactory, time } = {}) {
     if (!configs || typeof configs !== "object" || Array.isArray(configs)) {
       throw new TypeError("LoggerRegistry configs must be an object");
     }
 
     const createLogger =
       loggerFactory ||
-      ((name, config) => new Logger({ name, config }));
+      ((name, config) => new Logger({ name, config, time }));
 
     if (typeof createLogger !== "function") {
       throw new TypeError("LoggerRegistry loggerFactory must be a function");

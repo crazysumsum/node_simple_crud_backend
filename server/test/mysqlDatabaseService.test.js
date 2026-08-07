@@ -5,6 +5,7 @@ import {
   MySqlDatabaseService
 } from "../src/services/mysqldatabase/MySqlDatabaseService.js";
 import { RequestContextService } from "../src/services/context/RequestContextService.js";
+import { createTestTime, servicesWithTime } from "../test-support/createTestTime.js";
 
 const config = {
   queryTimeoutMs: 2500,
@@ -15,7 +16,9 @@ const silentLogger = {
   debug: async () => {},
   error: async () => {}
 };
-const context = new RequestContextService();
+const context = new RequestContextService({
+  services: servicesWithTime(createTestTime())
+});
 
 test("MySQL database service verifies connectivity during initialization", async () => {
   const calls = [];

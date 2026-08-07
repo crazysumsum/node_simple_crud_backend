@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { Logger } from "../src/services/logging/Logger.js";
 import { SystemLogger } from "../src/services/logging/systemLogger.js";
+import { createTestTime } from "../test-support/createTestTime.js";
 
 test("system logger requires an injected logger", () => {
   assert.throws(
@@ -28,10 +29,10 @@ test("system logger writes independent JSONL logs and redacts sensitive context"
       filePrefix: "system",
       retentionDays: 30,
       cleanupIntervalHours: 24,
-      timeZone: "Asia/Hong_Kong",
       maxFileSizeBytes: 10485760,
       redactedFields: ["password", "token"]
-    }
+    },
+    time: createTestTime()
   });
   const logger = new SystemLogger({ logger: profileLogger });
 
