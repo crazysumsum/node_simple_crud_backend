@@ -4,8 +4,10 @@ import {
 } from "../services/serviceAccess.js";
 import { ApplicationError } from "../errors/ApplicationError.js";
 import { sendSuccess } from "../http/apiResponse.js";
+import { sendFileResponse } from "../http/fileResponse.js";
 
 const HANDLER_RESPONSE = Symbol("handlerResponse");
+const HANDLER_FILE_RESPONSE = Symbol("handlerFileResponse");
 const RESPONSE_WRITE_METHODS = new Set([
   "download",
   "end",
@@ -160,6 +162,24 @@ export class BaseRequestHandler {
         throw directResponseError(this.handlerName, "headers");
       }
 
+      if (result?.[HANDLER_FILE_RESPONSE]) {
+        if (!req.apiRoute?.download?.enabled) {
+          throw new ApplicationError(
+            `Handler "${this.handlerName}" returned a file response without declaring download.enabled`,
+            {
+              code: "HANDLER_DOWNLOAD_NOT_DECLARED",
+              statusCode: 500,
+              publicCode: "INTERNAL_SERVER_ERROR",
+              publicMessage: "Internal server error"
+            }
+          );
+        }
+
+        // 檔案回應不套用統一信封，因此也沒有 responseSchema 可驗證。
+        await sendFileResponse(res, result);
+        return result;
+      }
+
       const response = result?.[HANDLER_RESPONSE]
         ? result
         : this.response(result);
@@ -243,6 +263,43 @@ export class BaseRequestHandler {
       data,
       statusCode,
       meta
+    };
+  }
+
+  /**
+   * 回傳一個檔案下載。只有在 static api.download.enabled 為 true 的 route 可用。
+   *
+   * 三選一：`path` 送出磁碟上的檔案，`buffer` 送出記憶體內容，`stream` 串流
+   * 產生中的內容（例如即時產出的 Excel）。框架負責 Content-Type、
+   * Content-Disposition 與 Content-Length，handler 不需要、也不允許直接寫回應。
+   *
+   * `path` 一律要先經過 resolveWithinDirectory 檢查，避免請求參數決定讀取位置。
+   */
+  file({ path: filePath, buffer, stream, fileName, contentType, statusCode = 200 } = {}) {
+    const sources = [filePath, buffer, stream].filter(
+      (value) => value !== undefined && value !== null
+    );
+
+    if (sources.length !== 1) {
+      throw new TypeError(
+        `Handler "${this.handlerName}" file response requires exactly one of path, buffer or stream`
+      );
+    }
+
+    if (!fileName) {
+      throw new TypeError(
+        `Handler "${this.handlerName}" file response requires a fileName`
+      );
+    }
+
+    return {
+      [HANDLER_FILE_RESPONSE]: true,
+      path: filePath,
+      buffer,
+      stream,
+      fileName,
+      contentType,
+      statusCode
     };
   }
 }

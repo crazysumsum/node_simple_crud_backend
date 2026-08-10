@@ -346,6 +346,112 @@ are rejected during startup validation with an explicit message. Query strings a
 parsed with the extended parser, so `?filter[status]=open` still arrives as a nested
 object and must be declared that way in `requestSchema.query`.
 
+## File Uploads And Downloads
+
+Both are off by default and enabled per route in `static api`. Defaults live under
+`defaults.upload` and `defaults.download` in `server/config/api.js`; a handler
+overrides only the fields it needs.
+
+### Uploads
+
+```js
+static api = {
+  method: "POST",
+  path: "/api/v1/documents",
+  description: "Attach a scanned invoice.",
+  upload: {
+    enabled: true,
+    maxFileSizeBytes: 5242880,
+    maxFiles: 3,
+    allowedMimeTypes: ["application/pdf"]
+  },
+  requestSchema: {
+    body: {
+      type: "object",
+      required: ["invoiceId"],
+      additionalProperties: false,
+      properties: { invoiceId: { type: "string" } }
+    }
+  },
+  responseSchema: { 201: { /* ... */ } }
+};
+
+async execute(req) {
+  // Text fields arrive in req.input.body and are schema-validated as usual.
+  // Files arrive in req.files, already validated and written to disk.
+  for (const file of req.files) {
+    await this.mysqlDatabase.execute(
+      "INSERT INTO documents (invoice_id, stored_name, original_name, mime_type, size) VALUES (?, ?, ?, ?, ?)",
+      [req.input.body.invoiceId, file.storedName, file.originalName, file.mimeType, file.size]
+    );
+  }
+
+  return this.response({ stored: req.files.length }, { statusCode: 201 });
+}
+```
+
+Each entry in `req.files` carries `field`, `originalName`, `storedName`, `path`,
+`mimeType` and `size`.
+
+**Type checking is by content, not by label.** A declared MIME type and a file
+extension are both attacker-controlled strings — naming a shell script `invoice.pdf`
+and declaring `application/pdf` takes no effort. The framework requires all three to
+agree: the declared type must be in the route allowlist, the extension must match that
+type, and the leading bytes must match its signature. `allowedMimeTypes` therefore
+only accepts types the framework can verify by content; anything else is a startup
+error rather than a silently unchecked allowlist entry. The supported set lives in
+`server/src/framework/upload/fileSignatures.js`.
+
+Two limits of that approach are worth knowing. OOXML formats (`.xlsx`, `.docx`,
+`.pptx`) are ZIP containers, so they are verified as ZIP plus an OOXML marker rather
+than distinguished from one another. Text formats (`text/csv`, `text/plain`) have no
+signature at all and are only checked for being decodable text without NUL bytes.
+
+Other guarantees:
+
+- The client filename is never used on disk. Stored names are a generated UUID plus
+  the extension for the verified type, so `../../.ssh/authorized_keys` is inert. The
+  original name is passed to the handler as metadata for you to store if you want it.
+- Size limits abort mid-stream; an oversized upload is never fully buffered or
+  written. Files are held in memory until validation passes, so `maxFileSizeBytes` is
+  also the per-request memory ceiling.
+- Parsing runs **after** authentication and authorization, so anonymous traffic cannot
+  make the server parse uploads.
+- A partially written batch is cleaned up rather than left behind.
+- Files are written `0600` into a `0700` directory, configurable per route.
+- Rejected uploads are never stored.
+
+### Downloads
+
+```js
+static api = {
+  method: "GET",
+  path: "/api/v1/reports/:id",
+  download: { enabled: true },
+  ...
+};
+
+async execute(req) {
+  const filePath = resolveWithinDirectory(uploadDirectory, req.input.params.id);
+  return this.file({ path: filePath, fileName: "季度報表.pdf", contentType: "application/pdf" });
+}
+```
+
+`this.file()` takes exactly one of `path`, `buffer` or `stream`, so stored files,
+in-memory content and generated exports all work. The framework sets `Content-Type`,
+`Content-Disposition` (with an RFC 5987 `filename*` so non-ASCII names survive),
+`Content-Length` where known, and `Cache-Control: private, no-store`.
+
+Calling `this.file()` on a route that has not declared `download.enabled` is a 500,
+not a silent bypass — the JSON envelope stays the default and opting out is explicit.
+
+Whenever a path is derived from request input, pass it through
+`resolveWithinDirectory` from `server/src/framework/http/fileResponse.js`. It resolves
+against the allowed root and rejects anything that escapes it.
+
+Request logging skips file bodies automatically in both directions; see
+[Request And Response Bodies](#request-and-response-bodies).
+
 ## Request Context
 
 `server/src/services/context/RequestContextService.js` stores request-scoped state in

@@ -21,6 +21,8 @@ const ALLOWED_API_FIELDS = new Set([
   "deprecation",
   "idempotency",
   "logging",
+  "upload",
+  "download",
   "timeoutMs"
 ]);
 
@@ -98,6 +100,16 @@ export function resolveApiDefinitions(handlers, defaults) {
         normalizedDefaults.logging,
         override.logging,
         `${handler.constructor.name}.static api.logging`
+      ),
+      upload: mergeObject(
+        normalizedDefaults.upload,
+        override.upload,
+        `${handler.constructor.name}.static api.upload`
+      ),
+      download: mergeObject(
+        normalizedDefaults.download,
+        override.download,
+        `${handler.constructor.name}.static api.download`
       ),
       requestSchema: override.requestSchema,
       responseSchema: override.responseSchema,

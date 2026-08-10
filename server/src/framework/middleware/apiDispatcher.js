@@ -12,6 +12,11 @@ import { IdempotencyManager } from "../idempotency/IdempotencyManager.js";
 import { MemoryIdempotencyStore } from "../idempotency/IdempotencyStore.js";
 import { normalizeIdempotencyConfig } from "../idempotency/normalizeIdempotencyConfig.js";
 import { createRequestTimeoutMiddleware } from "./requestTimeout.js";
+import { createUploadMiddleware } from "../upload/uploadMiddleware.js";
+import {
+  normalizeDownloadConfig,
+  normalizeUploadConfig
+} from "../upload/normalizeUploadConfig.js";
 import { RequestValidator } from "../validation/requestValidator.js";
 import { ResponseValidator } from "../validation/responseValidator.js";
 import { normalizeApiVersioningConfig } from "../versioning/normalizeApiVersioningConfig.js";
@@ -232,6 +237,16 @@ export function createApiDispatcher({
       routeKey
     );
     const logging = normalizeRouteLogging(route.logging, routeKey);
+    const upload = route.upload
+      ? normalizeUploadConfig(route.upload, `upload config for ${routeKey}`)
+      : null;
+    const download = normalizeDownloadConfig(
+      route.download || {},
+      `download config for ${routeKey}`
+    );
+    const uploadMiddleware = upload?.enabled
+      ? createUploadMiddleware({ config: upload, logger: activeLogger })
+      : null;
     const validateRequest = activeValidator.compile(route.requestSchema, routeKey);
     const validateResponse = activeResponseValidator.compile(
       route.responseSchema,
@@ -248,6 +263,15 @@ export function createApiDispatcher({
       deprecation: lifecycle,
       idempotency,
       logging,
+      upload: upload?.enabled
+        ? Object.freeze({
+            enabled: true,
+            maxFileSizeBytes: upload.maxFileSizeBytes,
+            maxFiles: upload.maxFiles,
+            allowedMimeTypes: upload.allowedMimeTypes
+          })
+        : Object.freeze({ enabled: false }),
+      download,
       timeoutMs,
       requestSchemaLocations: Object.keys(route.requestSchema),
       responseStatusCodes: Object.keys(route.responseSchema)
@@ -288,6 +312,18 @@ export function createApiDispatcher({
             registeredApi
           );
           context.update({ authorizationPolicies: policies });
+
+          // 上傳解析刻意排在認證與授權之後：先驗證身分，未通過的請求連
+          // multipart body 都不會被讀取，避免匿名流量佔用解析與磁碟資源。
+          // 解析後表單的文字欄位會進 req.body，接著才做 schema 驗證。
+          if (uploadMiddleware) {
+            await new Promise((resolve, reject) => {
+              uploadMiddleware(req, res, (error) =>
+                error ? reject(error) : resolve()
+              );
+            });
+          }
+
           validateRequest(req);
           await activeIdempotencyManager.execute(
             req,

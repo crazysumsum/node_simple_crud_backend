@@ -1,3 +1,8 @@
+import {
+  normalizeDownloadConfig,
+  normalizeUploadConfig
+} from "../upload/normalizeUploadConfig.js";
+
 const AUTH_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9._-]*$/;
 const BODY_CAPTURE_MODES = ["none", "full"];
 
@@ -62,6 +67,8 @@ export function normalizeApiDefaultsConfig(source, { defaultVersion } = {}) {
   const deprecation = cloneData(source.deprecation, "API defaults deprecation");
   const idempotency = cloneData(source.idempotency, "API defaults idempotency");
   const logging = cloneData(source.logging, "API defaults logging");
+  const upload = cloneData(source.upload, "API defaults upload");
+  const download = cloneData(source.download, "API defaults download");
   const timeoutMs = source.timeoutMs;
 
   if (!/^v[1-9]\d*$/.test(version)) {
@@ -110,6 +117,8 @@ export function normalizeApiDefaultsConfig(source, { defaultVersion } = {}) {
     deprecation,
     idempotency,
     logging,
+    upload: normalizeUploadConfig(upload),
+    download: normalizeDownloadConfig(download),
     timeoutMs: timeoutMs === null ? null : Number(timeoutMs)
   });
 }

@@ -172,6 +172,9 @@ test("dispatcher invokes a configured public API", async (t) => {
       idempotency: { enabled: false, ttlMs: 86400000 },
       // route 未指定時收斂成安全預設，requestLogger 才能無條件讀取。
       logging: { bodyCapture: "none" },
+      // 檔案上傳與下載都必須明確啟用。
+      upload: { enabled: false },
+      download: { enabled: false },
       timeoutMs: 30000,
       requestSchemaLocations: [],
       responseStatusCodes: ["200"]
