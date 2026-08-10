@@ -1,3 +1,5 @@
+import { reportInternalFailure } from "../../framework/diagnostics/reportInternalFailure.js";
+
 export class SystemLogger {
   constructor({ logger } = {}) {
     if (!logger || typeof logger.write !== "function") {
@@ -24,7 +26,11 @@ export class SystemLogger {
     try {
       await this.logger.write(entry);
     } catch (error) {
-      console.error(`Failed to write system log: ${error.message}`);
+      // 寫系統日誌失敗不能再走系統日誌，只能落到 stderr 的最後手段。
+      reportInternalFailure("logging.system_write_failed", error, {
+        droppedEvent: entry.event,
+        droppedLevel: entry.level
+      });
     }
   }
 

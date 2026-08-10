@@ -78,21 +78,47 @@ export function createRequestTimeoutMiddleware({
       const error = new RequestTimeoutError(normalizedTimeoutMs);
       controller.abort(error);
 
+      // 回應已經開始送出時（檔案下載會先送 header 再串流內容）不可能再改成
+      // 504：res.setHeader 會直接拋 ERR_HTTP_HEADERS_SENT。這裡是計時器
+      // callback，拋出的例外沒有任何 try 接得到，會變成 uncaughtException
+      // 並讓整個程序結束。這種情況只能中斷連線，讓客戶端看到截斷的傳輸。
+      const responseAlreadyStarted = res.headersSent;
+
       void logger.warn("http.request_timeout", "HTTP request timed out", {
         requestId: req.requestId || null,
         method: req.method,
         url: req.originalUrl || req.url,
         api: req.apiRoute || null,
         timeoutMs: normalizedTimeoutMs,
-        elapsedMs: time.nowMs() - startedAt
+        elapsedMs: time.nowMs() - startedAt,
+        responseAlreadyStarted
       });
 
-      sendError(res, {
-        statusCode: error.statusCode,
-        code: error.publicCode,
-        message: error.publicMessage,
-        time
-      });
+      if (responseAlreadyStarted) {
+        res.destroy(error);
+        return;
+      }
+
+      try {
+        sendError(res, {
+          statusCode: error.statusCode,
+          code: error.publicCode,
+          message: error.publicMessage,
+          time
+        });
+      } catch (responseError) {
+        // 同上：計時器內任何未捕捉的例外都會終止程序，所以連「送出逾時回應
+        // 本身失敗」也要兜住，寧可放棄回應只斷線。
+        void logger.error?.(
+          "http.request_timeout.response_failed",
+          "Failed to send the timeout response",
+          {
+            requestId: req.requestId || null,
+            error: { name: responseError.name, message: responseError.message }
+          }
+        );
+        res.destroy(error);
+      }
     }, normalizedTimeoutMs);
     timer.unref?.();
 

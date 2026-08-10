@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
 
 function plainObject(value, fieldName) {
   if (value === undefined) {
@@ -333,8 +334,14 @@ export class ServiceContainer {
 
       try {
         await lifecycleMethod?.call(instance);
-      } catch {
-        // Preserve the startup error; cleanup failures are reported during normal shutdown.
+      } catch (cleanupError) {
+        // 原本的啟動錯誤才是根因，要原封不動往上拋。但這個 instance 從來沒有
+        // 被 track，正常 shutdown 不會再碰它一次——清理失敗在這裡不記就永遠
+        // 消失了。logging service 自己可能就是啟動失敗的那一個，所以走 stderr。
+        reportInternalFailure("services.rollback_cleanup_failed", cleanupError, {
+          service: definition.name,
+          startupError: error.message
+        });
       }
 
       throw error;

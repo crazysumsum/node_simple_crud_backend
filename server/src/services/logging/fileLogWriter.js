@@ -1,5 +1,6 @@
 import { appendFile, chmod, mkdir, readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
+import { reportInternalFailure } from "../../framework/diagnostics/reportInternalFailure.js";
 
 // Shared JSONL file writer used by every configured Logger.
 
@@ -35,6 +36,12 @@ export class FileLogWriter {
 
     this.lastCleanupAt = 0;
     this.queue = Promise.resolve();
+    // 寫入是串行的，磁碟一慢佇列就會堆積。沒有上限的話，堆積的是完整的日誌
+    // 條目（錯誤時含整個 request／response body），會一路吃掉記憶體直到程序
+    // 被 OOM 殺掉——為了記錄故障而製造更大的故障。
+    this.queuedEntries = 0;
+    this.droppedEntries = 0;
+    this.failedEntries = 0;
     // 目前寫入中的檔案。快取路徑與大小，避免每一筆日誌都 readdir + stat 整個目錄
     // ——那個成本會隨保留天數累積的檔案數線性上升，而寫入是在請求路徑上。
     this.target = null;
@@ -57,9 +64,12 @@ export class FileLogWriter {
     try {
       await chmod(directory, directoryMode);
     } catch (error) {
-      console.error(
-        `Failed to restrict log directory permissions on ${directory}: ${error.message}`
-      );
+      // 收不緊權限代表日誌可能被其他帳號讀走，而日誌裡有完整的 body。
+      // 這是安全事件，絕不能只是「盡力而為」地靜靜失敗。
+      reportInternalFailure("logging.directory_mode_failed", error, {
+        directory,
+        requestedMode: directoryMode?.toString(8) ?? null
+      });
       return;
     }
 
@@ -67,7 +77,8 @@ export class FileLogWriter {
 
     try {
       files = await readdir(directory);
-    } catch {
+    } catch (error) {
+      reportInternalFailure("logging.directory_scan_failed", error, { directory });
       return;
     }
 
@@ -81,38 +92,89 @@ export class FileLogWriter {
           try {
             await chmod(path.join(directory, fileName), fileMode);
           } catch (error) {
-            console.error(
-              `Failed to restrict log file permissions on ${fileName}: ${error.message}`
-            );
+            reportInternalFailure("logging.file_mode_failed", error, {
+              directory,
+              fileName,
+              requestedMode: fileMode?.toString(8) ?? null
+            });
           }
         })
     );
   }
 
-  write(entry) {
-    const task = this.queue.then(async () => {
-      await this.ready;
-      await this.cleanupIfDue();
+  /**
+   * 佇列滿或寫入失敗時只能把該筆日誌丟掉，但丟棄本身不可以是靜默的——日誌
+   * 中間少了一段，看的人無從得知。統計會補在下一筆成功寫入的前面，而且要等
+   * appendFile 真的成功才扣減，否則連這筆統計也可能一起消失。
+   */
+  lostEntriesNotice(timestamp) {
+    const droppedEntries = this.droppedEntries;
+    const failedEntries = this.failedEntries;
 
-      const entryTimestamp = entry.timestamp;
+    if (droppedEntries === 0 && failedEntries === 0) {
+      return { line: "", commit: () => {} };
+    }
 
-      if (!entryTimestamp) {
-        throw new Error("Log entry must contain a valid timestamp");
+    const line = `${JSON.stringify({
+      timestamp,
+      level: "error",
+      event: "logging.entries_lost",
+      message: "Log entries were lost because the writer could not keep up",
+      context: {
+        droppedEntries,
+        failedEntries,
+        maxQueuedEntries: this.config.maxQueuedEntries
       }
+    })}\n`;
 
-      const date = this.time.fileDate(entryTimestamp);
-      const content = `${JSON.stringify(entry)}\n`;
-      const contentSize = Buffer.byteLength(content, "utf8");
-      const filePath = await this.filePathForWrite(date, contentSize);
+    return {
+      line,
+      commit: () => {
+        // 扣減而非歸零：等待期間可能又累積了新的。
+        this.droppedEntries -= droppedEntries;
+        this.failedEntries -= failedEntries;
+      }
+    };
+  }
 
-      // mode 只在這一次呼叫實際建立檔案時生效；既有檔案由 restrictExistingFiles 處理。
-      await appendFile(filePath, content, {
-        encoding: "utf8",
-        mode: this.config.fileMode
-      });
+  write(entry) {
+    if (this.queuedEntries >= this.config.maxQueuedEntries) {
+      this.droppedEntries += 1;
+      return Promise.resolve();
+    }
+
+    this.queuedEntries += 1;
+    const task = this.queue.then(async () => {
+      try {
+        await this.ready;
+        await this.cleanupIfDue();
+
+        const entryTimestamp = entry.timestamp;
+
+        if (!entryTimestamp) {
+          throw new Error("Log entry must contain a valid timestamp");
+        }
+
+        const date = this.time.fileDate(entryTimestamp);
+        const notice = this.lostEntriesNotice(entryTimestamp);
+        const content = `${notice.line}${JSON.stringify(entry)}\n`;
+        const contentSize = Buffer.byteLength(content, "utf8");
+        const filePath = await this.filePathForWrite(date, contentSize);
+
+        // mode 只在這一次呼叫實際建立檔案時生效；既有檔案由 restrictExistingFiles 處理。
+        await appendFile(filePath, content, {
+          encoding: "utf8",
+          mode: this.config.fileMode
+        });
+        notice.commit();
+      } finally {
+        this.queuedEntries -= 1;
+      }
     });
 
-    this.queue = task.catch(() => {});
+    this.queue = task.catch(() => {
+      this.failedEntries += 1;
+    });
     return task;
   }
 

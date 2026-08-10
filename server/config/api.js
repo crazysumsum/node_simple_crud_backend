@@ -54,6 +54,11 @@ const apiConfig = {
       // 表單文字欄位數量上限。
       maxFieldCount: 20,
 
+      // 單一表單文字欄位的大小上限（bytes）。超限的欄位會讓整個請求被拒絕，
+      // 而不是靜默截斷。maxFieldCount × maxFieldSizeBytes 決定了檔案以外
+      // 的請求體上限，調高前請一併考慮這個乘積。
+      maxFieldSizeBytes: 65536,
+
       // 允許的檔案型別。框架會同時比對「客戶端宣告的 MIME、副檔名、檔案實際
       // 內容的簽章」三者，任何一項不符即拒絕——只比對前兩者等於沒有校驗。
       // 因此只接受已在 FileTypeService 註冊的型別；要新增型別請在

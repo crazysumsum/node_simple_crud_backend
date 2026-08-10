@@ -2,6 +2,7 @@ import {
   optionalService,
   systemLoggerFromServices
 } from "../services/serviceAccess.js";
+import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
 import { ApplicationError } from "../errors/ApplicationError.js";
 import { sendSuccess } from "../http/apiResponse.js";
 import { sendFileResponse } from "../http/fileResponse.js";
@@ -238,7 +239,8 @@ export class BaseRequestHandler {
     }
   }
 
-  // 送出日誌但不等待落盤。寫入失敗只記在 console，不可讓原本成功的請求失敗。
+  // 送出日誌但不等待落盤。寫入失敗不可讓原本成功的請求失敗，但也不能無聲
+  // 消失——只能交給 stderr 的最後手段，因為壞掉的正是日誌本身。
   writeLog(level, event, message, context) {
     const write = this.logger?.[level];
 
@@ -248,7 +250,11 @@ export class BaseRequestHandler {
 
     Promise.resolve(write.call(this.logger, event, message, context)).catch(
       (error) => {
-        console.error(`Failed to record handler event: ${error.message}`);
+        reportInternalFailure("logging.handler_write_failed", error, {
+          handler: this.constructor.handlerName || this.constructor.name,
+          droppedEvent: event,
+          droppedLevel: level
+        });
       }
     );
   }

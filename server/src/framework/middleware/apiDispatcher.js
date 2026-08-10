@@ -12,6 +12,7 @@ import { IdempotencyManager } from "../idempotency/IdempotencyManager.js";
 import { MemoryIdempotencyStore } from "../idempotency/IdempotencyStore.js";
 import { normalizeIdempotencyConfig } from "../idempotency/normalizeIdempotencyConfig.js";
 import { createRequestTimeoutMiddleware } from "./requestTimeout.js";
+import { cleanupUploadedFiles } from "../upload/cleanupUploadedFiles.js";
 import { createUploadMiddleware } from "../upload/uploadMiddleware.js";
 import {
   normalizeDownloadConfig,
@@ -269,6 +270,8 @@ export function createApiDispatcher({
             enabled: true,
             maxFileSizeBytes: upload.maxFileSizeBytes,
             maxFiles: upload.maxFiles,
+            maxFieldCount: upload.maxFieldCount,
+            maxFieldSizeBytes: upload.maxFieldSizeBytes,
             allowedMimeTypes: upload.allowedMimeTypes
           })
         : Object.freeze({ enabled: false }),
@@ -332,8 +335,25 @@ export function createApiDispatcher({
             idempotency,
             () => handler.handle(req, res, next)
           );
+
+          // 重播回傳的是上一次的回應，handler 根本沒有執行，所以這次帶上來的
+          // 檔案不會被任何東西引用。
+          if (req.idempotentReplay) {
+            await cleanupUploadedFiles(req, activeLogger, "idempotent_replay");
+          }
         } catch (error) {
-          if (req.requestTimeout?.signal?.aborted && res.writableEnded) {
+          // 驗證失敗與 handler 拋錯都發生在檔案落盤之後。沒有這一步，每一個
+          // 失敗的上傳請求都會在磁碟上留下一個永遠不會被清掉的檔案。
+          await cleanupUploadedFiles(req, activeLogger, error.code || error.name);
+
+          // 逾時中斷一個進行中的下載，串流會以 ERR_STREAM_PREMATURE_CLOSE
+          // 收場。那不是新的故障——逾時本身已經記錄過了——而且回應早就送出
+          // 一半，改不成錯誤回應。往下丟只會讓 express 的 finalhandler 再把
+          // 同一件事印一次。
+          if (
+            req.requestTimeout?.signal?.aborted &&
+            (res.writableEnded || res.destroyed || res.headersSent)
+          ) {
             return;
           }
 

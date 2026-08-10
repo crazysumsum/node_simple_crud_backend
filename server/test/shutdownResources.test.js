@@ -67,8 +67,19 @@ test("shutdown gives up on a store whose close never settles", async (t) => {
   // 永不 resolve：沒有逾時保護的話，關閉流程會永遠停在這裡。
   rateLimitStore.close = () => new Promise(() => {});
 
+  // 逾時之後的每一步預算都只剩 1ms，而 MemoryIdempotencyStore.close() 是純
+  // microtask。兩者相加會讓整段收尾在同一次 microtask drain 裡跑完，搶在同
+  // 一毫秒到期的強制結束計時器之前執行 clearTimeout——測試就變成擲硬幣。
+  // 真實的 store 關閉一定會做 IO，這裡照樣跨一次事件迴圈。
+  const idempotencyStore = new MemoryIdempotencyStore();
+  idempotencyStore.close = () =>
+    new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+
   const { application, forcedExits } = await startApplication(t, {
     rateLimitStore,
+    idempotencyStore,
     shutdownTimeoutMs: 300
   });
   const startedAt = Date.now();

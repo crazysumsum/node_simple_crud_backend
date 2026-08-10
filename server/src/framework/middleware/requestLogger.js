@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
 
 // 未記錄的 body 會留下標記，讓日誌讀者分得出「政策決定不記」與「本來就沒有」。
 const NOT_LOGGED = "[NOT_LOGGED]";
@@ -234,9 +235,15 @@ export function createRequestLogger({ logger, time } = {}) {
         }
       };
 
-      // 非同步落盤不阻塞 HTTP 回應；寫入失敗亦不應令原本的請求失敗。
+      // 非同步落盤不阻塞 HTTP 回應；寫入失敗亦不應令原本的請求失敗，但必須
+      // 留下痕跡——請求日誌無聲消失時，事後沒有任何線索指出中間少了一段。
       logger.write(entry).catch((error) => {
-        console.error(`Failed to write request log: ${error.message}`);
+        reportInternalFailure("logging.request_write_failed", error, {
+          requestId: req.requestId || null,
+          method: req.method,
+          url: req.originalUrl || req.url,
+          statusCode: res.statusCode
+        });
       });
     };
 

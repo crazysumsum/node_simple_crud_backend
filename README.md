@@ -101,6 +101,11 @@ with an inline comment in that file. Common logger settings include:
 - `retentionDays`: number of days to retain log files
 - `cleanupIntervalHours`: expired-log cleanup frequency
 - `maxFileSizeBytes`: maximum size of each log file before a numbered file is created
+- `maxQueuedEntries`: how many entries may wait to be written before new ones are
+  dropped. Writes are serialized, so a slow disk builds a backlog of full log entries
+  — which include complete request and response bodies on errors. Dropping is not
+  silent: the next successful write is preceded by a `logging.entries_lost` entry
+  counting what was lost.
 - `minimumLevel`: lowest level written by the generic logger
 - `redactedFields`: field names that are replaced with `[REDACTED]`
 - `bodyCapture`: `none` (default) or `full`, for request and response bodies
@@ -174,6 +179,33 @@ use `this.services.require("logging").require("audit")`.
 Startup logs cover configuration loading, Express middleware, MySQL connection pool
 creation and verification, authentication strategy loading, every API registration,
 the global error handler, and the final listening address.
+
+### When Logging Itself Fails
+
+A log write that fails cannot be reported through the log — that is either infinite
+recursion or the same silent loss again. Those failures go to
+`reportInternalFailure` in `server/src/framework/diagnostics/`, which writes to
+stderr, the one channel that does not depend on anything the application owns.
+Container runtimes, systemd and PM2 all collect it.
+
+It writes the same five-field JSONL as every other log, so it parses in the same
+pipeline and can be alerted on. Repeats of the same event are throttled to one line
+per minute and reported with `suppressedSinceLastReport` — a full disk is a
+continuous failure, and one line per request would bury the first real error.
+
+The events are `logging.system_write_failed`, `logging.request_write_failed`,
+`logging.handler_write_failed`, `logging.limiter_write_failed`,
+`logging.directory_mode_failed`, `logging.file_mode_failed`,
+`logging.directory_scan_failed`, `logging.entries_lost`,
+`services.rollback_cleanup_failed`, `application.startup_failed` and
+`application.shutdown.forced`. **Any of them appearing means log data was lost or
+log files are not protected as configured; alert on all of them.**
+
+Failures that happen outside the logging path use the normal logger and are visible
+in the system log — for example `auth.jwt.rejected` (which records whether a token
+was expired or forged, while the client only ever sees a generic `JWT_INVALID`),
+`idempotency.store.release_failed`, `upload.file_mode_failed` and
+`upload.cleanup_failed`.
 
 Every API handler must extend `BaseRequestHandler` and implement `execute()`. The base
 class records handler start and finish events with the request ID, timestamps,
@@ -408,7 +440,8 @@ async execute(req) {
 ```
 
 Each entry in `req.files` carries `field`, `originalName`, `storedName`, `path`,
-`mimeType` and `size`.
+`mimeType`, `size` and `contentHash` (SHA-256 of the file, computed before it is
+written).
 
 **Type checking is by content, not by label.** A declared MIME type and a file
 extension are both attacker-controlled strings — naming a shell script `invoice.pdf`
@@ -490,6 +523,21 @@ Other guarantees:
 - A partially written batch is cleaned up rather than left behind.
 - Files are written `0600` into a `0700` directory, configurable per route.
 - Rejected uploads are never stored.
+- Text fields are bounded too. `maxFieldSizeBytes` (64 KiB by default) caps each
+  field, and an oversized field is rejected rather than silently truncated. Without
+  it, `maxFieldCount` fields could carry far more data than `maxFileSizeBytes`
+  suggests the route accepts.
+- **Files are removed when the request does not succeed.** Uploads must be parsed
+  before schema validation — the text fields have to exist before they can be
+  validated — so a file is already on disk when a `400` or a handler exception
+  happens. The dispatcher deletes those files, and does the same for an idempotent
+  replay, where the handler never ran. A file survives only when the handler returns
+  successfully; keep the path in your own records at that point.
+- `Idempotency-Key` covers the uploaded files, not just the text fields. Resending
+  the same key with a different file is a `409` conflict, not a silent replay that
+  discards the new file.
+- A client that disconnects mid-upload releases its concurrency slot immediately
+  instead of holding it until the request timeout.
 
 ### Downloads
 
@@ -521,6 +569,13 @@ against the allowed root and rejects anything that escapes it.
 
 Request logging skips file bodies automatically in both directions; see
 [Request And Response Bodies](#request-and-response-bodies).
+
+Set `timeoutMs` on download routes deliberately. Once the response has started there
+is no way to turn it into a `504` — the headers are already sent — so a download that
+outruns its timeout is aborted mid-stream and the client sees a truncated transfer.
+The timeout log entry records this as `responseAlreadyStarted: true`. A large report
+served over a slow connection is a normal reason to raise the route's `timeoutMs`
+above the global default.
 
 ## Request Context
 

@@ -1,4 +1,5 @@
 import requestConfig from "../../../config/request.js";
+import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
 import { sendError } from "../http/apiResponse.js";
 import {
   markRequestProcessingCompleted,
@@ -385,7 +386,10 @@ export class RequestLimiter {
 
   writeSystemLog(level, event, message, context) {
     Promise.resolve(this.logger[level](event, message, context)).catch((error) => {
-      console.error(`Failed to record request limit event: ${error.message}`);
+      reportInternalFailure("logging.limiter_write_failed", error, {
+        droppedEvent: event,
+        droppedLevel: level
+      });
     });
   }
 }
