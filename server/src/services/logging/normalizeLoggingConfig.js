@@ -22,6 +22,36 @@ function positiveNumber(value, fieldName) {
   return number;
 }
 
+const BODY_CAPTURE_MODES = Object.freeze(["none", "full"]);
+
+function bodyCaptureMode(value, fieldName) {
+  const mode = String(value ?? "none").toLowerCase();
+
+  if (!BODY_CAPTURE_MODES.includes(mode)) {
+    throw new Error(
+      `Logging config "${fieldName}" must be one of: ${BODY_CAPTURE_MODES.join(", ")}`
+    );
+  }
+
+  return mode;
+}
+
+function errorStatusThreshold(value, fieldName) {
+  if (value === null || value === false) {
+    return null;
+  }
+
+  const status = Number(value ?? 400);
+
+  if (!Number.isInteger(status) || status < 100 || status > 599) {
+    throw new Error(
+      `Logging config "${fieldName}" must be an HTTP status code or null`
+    );
+  }
+
+  return status;
+}
+
 export function normalizeLoggerConfig(source, name = "logger") {
   const profile = requirePlainObject(source, `logging.loggers.${name}`);
   const directory = path.isAbsolute(profile.directory)
@@ -59,6 +89,14 @@ export function normalizeLoggerConfig(source, name = "logger") {
       `loggers.${name}.maxFileSizeBytes`
     ),
     minimumLevel,
+    bodyCapture: bodyCaptureMode(
+      profile.bodyCapture,
+      `loggers.${name}.bodyCapture`
+    ),
+    bodyCaptureErrorStatus: errorStatusThreshold(
+      profile.bodyCaptureErrorStatus,
+      `loggers.${name}.bodyCaptureErrorStatus`
+    ),
     redactedFields: Array.isArray(profile.redactedFields)
       ? Object.freeze(profile.redactedFields.map(String))
       : Object.freeze([])

@@ -103,6 +103,46 @@ with an inline comment in that file. Common logger settings include:
 - `maxFileSizeBytes`: maximum size of each log file before a numbered file is created
 - `minimumLevel`: lowest level written by the generic logger
 - `redactedFields`: field names that are replaced with `[REDACTED]`
+- `bodyCapture`: `none` (default) or `full`, for request and response bodies
+- `bodyCaptureErrorStatus`: status code at or above which bodies are always kept
+
+### Request And Response Bodies
+
+Bodies are **not** logged by default. `redactedFields` is a denylist, so it only masks
+field names someone thought to list; business payloads carry national ID numbers,
+salaries, bank accounts and addresses under names no denylist enumerates. A body that
+is not recorded appears as `"[NOT_LOGGED]"`.
+
+Four rules decide what is written, in this order:
+
+| Condition | Behaviour |
+| --- | --- |
+| File upload or download | never logged, recorded as `"[FILE_TRANSFER]"` |
+| Status ≥ `bodyCaptureErrorStatus` (default 400) | request and response bodies logged in full |
+| Route sets `logging.bodyCapture: "full"` | logged in full |
+| Otherwise | not logged |
+
+`redactedFields` still applies whenever a body is logged, and file transfers are
+detected from the content type, so a `multipart/` upload or a non-JSON response is
+skipped even on an error.
+
+A route opts in through its handler:
+
+```js
+static api = {
+  path: "/api/v1/webhooks/payment",
+  logging: { bodyCapture: "full" },
+  ...
+};
+```
+
+Note that the default error threshold of 400 means **validation failures record the
+submitted body**, including whatever personal data the user typed. That is a
+deliberate trade for reproducibility. Raise `bodyCaptureErrorStatus` to `500` to keep
+only server faults, or set it to `null` to disable the override entirely.
+
+Query strings are always recorded as part of `context.url` with `redactedFields`
+applied, so treat them as logged and keep personal data out of them.
 
 The logger profiles do not define a time zone. `application.timeZone` is the single
 source of truth for every profile and every system-generated timestamp. Configuration

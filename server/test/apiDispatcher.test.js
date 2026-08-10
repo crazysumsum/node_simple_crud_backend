@@ -170,6 +170,8 @@ test("dispatcher invokes a configured public API", async (t) => {
         replacement: null
       },
       idempotency: { enabled: false, ttlMs: 86400000 },
+      // route 未指定時收斂成安全預設，requestLogger 才能無條件讀取。
+      logging: { bodyCapture: "none" },
       timeoutMs: 30000,
       requestSchemaLocations: [],
       responseStatusCodes: ["200"]

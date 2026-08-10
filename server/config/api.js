@@ -27,6 +27,13 @@ const apiConfig = {
       ttlMs: null
     },
 
+    // API 預設不記錄 request／response body。需要完整 body 的接口可設為 "full"，
+    // 但要先確認該接口不會經手個資。HTTP >= 400 的回應不受此設定影響，
+    // 一律完整記錄；檔案上下傳則一律不記錄。詳見 config/logging.js。
+    logging: {
+      bodyCapture: "none"
+    },
+
     // null 表示沿用 application.js 的全域 requestTimeoutMs。
     timeoutMs: null
   },

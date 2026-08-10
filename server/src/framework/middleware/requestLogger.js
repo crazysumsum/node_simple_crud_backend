@@ -1,5 +1,47 @@
 import { randomUUID } from "node:crypto";
 
+// 未記錄的 body 會留下標記，讓日誌讀者分得出「政策決定不記」與「本來就沒有」。
+const NOT_LOGGED = "[NOT_LOGGED]";
+const FILE_TRANSFER = "[FILE_TRANSFER]";
+
+// 檔案上傳的 content type。上傳內容不是結構化欄位，記進 JSONL 只會塞爆日誌，
+// 而且附件本身往往就是最敏感的資料。
+const FILE_UPLOAD_TYPE = /^(multipart\/|application\/octet-stream)/i;
+// 只有結構化的文字回應值得記錄；其餘一律視為檔案下載。
+const TEXTUAL_RESPONSE_TYPE = /^(application\/json|application\/[\w.+-]*\+json|text\/)/i;
+
+function contentTypeOf(value) {
+  return String(value || "").split(";")[0].trim();
+}
+
+function isFileUpload(req) {
+  return FILE_UPLOAD_TYPE.test(contentTypeOf(req.get?.("content-type")));
+}
+
+function isFileDownload(responseContentType, body) {
+  if (Buffer.isBuffer(body)) {
+    return true;
+  }
+
+  const contentType = contentTypeOf(responseContentType);
+  return contentType !== "" && !TEXTUAL_RESPONSE_TYPE.test(contentType);
+}
+
+/**
+ * 決定這次請求要不要完整記錄 body。
+ *
+ * 優先序：檔案傳輸永不記錄，其次是錯誤狀態碼強制記錄，最後才看 route 或
+ * 全域設定。錯誤覆寫刻意排在 route 設定之前——出錯時重現問題的價值高於
+ * 節省日誌，這是專案明確選擇的取捨。
+ */
+function shouldCaptureBody({ mode, statusCode, errorStatus }) {
+  if (errorStatus !== null && statusCode >= errorStatus) {
+    return true;
+  }
+
+  return mode === "full";
+}
+
 /**
  * 將 response body 轉成適合記錄的格式。
  * JSON 字串會還原成物件，讓後續流程仍可按欄位名稱遮蔽敏感值；
@@ -79,6 +121,45 @@ export function createRequestLogger({ logger, time } = {}) {
     throw new TypeError("Request logger middleware requires a time service");
   }
 
+  const defaultMode = logger.config?.bodyCapture ?? "none";
+  const errorStatus = logger.config?.bodyCaptureErrorStatus ?? null;
+
+  // req.apiRoute 由 apiDispatcher 設定，而日誌在 response 的 finish 事件才寫出，
+  // 所以這裡讀得到。未匹配任何 route 的請求（404、429）沿用全域預設。
+  const captureModeFor = (req) => req.apiRoute?.logging?.bodyCapture || defaultMode;
+
+  const requestBodyFor = (req, statusCode) => {
+    if (isFileUpload(req)) {
+      return FILE_TRANSFER;
+    }
+
+    if (
+      !shouldCaptureBody({ mode: captureModeFor(req), statusCode, errorStatus })
+    ) {
+      return NOT_LOGGED;
+    }
+
+    return req.body ?? null;
+  };
+
+  const responseBodyFor = (req, res, responseBody, responseContentType) => {
+    if (isFileDownload(responseContentType, responseBody)) {
+      return FILE_TRANSFER;
+    }
+
+    if (
+      !shouldCaptureBody({
+        mode: captureModeFor(req),
+        statusCode: res.statusCode,
+        errorStatus
+      })
+    ) {
+      return NOT_LOGGED;
+    }
+
+    return normalizeResponseBody(responseBody, String(responseContentType || ""));
+  };
+
   const middleware = function requestLogger(req, res, next) {
     const requestTimestamp = time.now();
     // hrtime 使用單調時鐘，計算回應時間時不會受系統時間校正影響。
@@ -142,15 +223,13 @@ export function createRequestLogger({ logger, time } = {}) {
           input: {
             query: req.query || {},
             params: req.params || {},
-            body: req.body ?? null
+            body: requestBodyFor(req, res.statusCode)
           },
           output: {
             statusCode: res.statusCode,
-            body: normalizeResponseBody(
-              responseBody,
-              String(responseContentType || "")
-            )
+            body: responseBodyFor(req, res, responseBody, responseContentType)
           },
+          bodyCapture: captureModeFor(req),
           completion
         }
       };

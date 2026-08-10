@@ -20,6 +20,7 @@ const ALLOWED_API_FIELDS = new Set([
   "authorizationPolicies",
   "deprecation",
   "idempotency",
+  "logging",
   "timeoutMs"
 ]);
 
@@ -92,6 +93,11 @@ export function resolveApiDefinitions(handlers, defaults) {
         normalizedDefaults.idempotency,
         override.idempotency,
         `${handler.constructor.name}.static api.idempotency`
+      ),
+      logging: mergeObject(
+        normalizedDefaults.logging,
+        override.logging,
+        `${handler.constructor.name}.static api.logging`
       ),
       requestSchema: override.requestSchema,
       responseSchema: override.responseSchema,

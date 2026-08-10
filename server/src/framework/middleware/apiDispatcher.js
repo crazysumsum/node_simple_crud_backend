@@ -24,6 +24,29 @@ const HTTP_METHODS = new Set(["delete", "get", "patch", "post", "put"]);
 // Express 5 移除了 :param? 與裸 * 兩種寫法。提早比對可換來清楚的設定錯誤訊息，
 // 而不是等 path-to-regexp 在註冊 route 時丟出難以對應到 handler 的例外。
 const LEGACY_PATH_SYNTAX = /:[A-Za-z0-9_]+\?|\*(?![A-Za-z_])/;
+const BODY_CAPTURE_MODES = new Set(["none", "full"]);
+
+// routes 也可以由呼叫端直接傳入，未必經過 apiDefinitionResolver 補上預設值。
+// 這裡收斂成一個一定存在且合法的物件，requestLogger 才能安全讀取。
+function normalizeRouteLogging(source, routeKey) {
+  if (source === undefined || source === null) {
+    return Object.freeze({ bodyCapture: "none" });
+  }
+
+  if (typeof source !== "object" || Array.isArray(source)) {
+    throw new Error(`logging config must be an object for ${routeKey}`);
+  }
+
+  const bodyCapture = String(source.bodyCapture ?? "none").toLowerCase();
+
+  if (!BODY_CAPTURE_MODES.has(bodyCapture)) {
+    throw new Error(
+      `logging.bodyCapture must be "none" or "full" for ${routeKey}`
+    );
+  }
+
+  return Object.freeze({ bodyCapture });
+}
 
 export function validateApiConfig(
   routes,
@@ -105,6 +128,7 @@ export function validateApiConfig(
     }
 
     idempotencyManager?.routeOptions(route.idempotency, routeKey);
+    normalizeRouteLogging(route.logging, routeKey);
 
     if (!(handlers[route.handler] instanceof BaseRequestHandler)) {
       throw new Error(`Handler not found for ${routeKey}: ${route.handler}`);
@@ -207,6 +231,7 @@ export function createApiDispatcher({
       route.idempotency,
       routeKey
     );
+    const logging = normalizeRouteLogging(route.logging, routeKey);
     const validateRequest = activeValidator.compile(route.requestSchema, routeKey);
     const validateResponse = activeResponseValidator.compile(
       route.responseSchema,
@@ -222,6 +247,7 @@ export function createApiDispatcher({
       version: lifecycle.version,
       deprecation: lifecycle,
       idempotency,
+      logging,
       timeoutMs,
       requestSchemaLocations: Object.keys(route.requestSchema),
       responseStatusCodes: Object.keys(route.responseSchema)

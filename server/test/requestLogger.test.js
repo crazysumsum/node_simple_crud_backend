@@ -107,12 +107,153 @@ test("request logger captures metadata and redacts sensitive fields", async () =
   assert.equal(entry.context.url, "/api/users?active=true");
   assert.equal(entry.context.clientIp, "127.0.0.1");
   assert.equal(entry.context.output.statusCode, 201);
-  assert.equal(entry.context.input.body.password, "[REDACTED]");
-  assert.equal(entry.context.output.body.token, "[REDACTED]");
+  // 成功回應預設不記錄 body：業務欄位帶的是個資，而 redactedFields 是黑名單，
+  // 擋不住列舉不完的欄位名。中介資料仍然完整保留。
+  assert.equal(entry.context.input.body, "[NOT_LOGGED]");
+  assert.equal(entry.context.output.body, "[NOT_LOGGED]");
+  assert.equal(entry.context.bodyCapture, "none");
   assert.equal(entry.context.completion, "finished");
   assert.match(entry.context.requestTime, /\+08:00$/);
   assert.match(entry.context.responseTime, /\+08:00$/);
   assert.ok(entry.context.durationMs >= 0);
+});
+
+/**
+ * 跑一次請求並取回寫出的日誌 entry。
+ */
+async function captureEntry({ config = {}, req = {}, apiRoute, status = 200, responseBody, responseContentType = "application/json; charset=utf-8" } = {}) {
+  let resolveEntry;
+  const entryWritten = new Promise((resolve) => {
+    resolveEntry = resolve;
+  });
+  const logger = new Logger({
+    name: "request",
+    config: { ...baseConfig, ...config },
+    time,
+    writer: { async write(entry) { resolveEntry(entry); } }
+  });
+  const middleware = createRequestLogger({ logger, time });
+  const request = {
+    method: "POST",
+    originalUrl: "/api/v1/employees",
+    headers: {},
+    ip: "127.0.0.1",
+    query: {},
+    params: {},
+    get(name) { return this.headers[name.toLowerCase()]; },
+    ...req
+  };
+
+  if (apiRoute) {
+    request.apiRoute = apiRoute;
+  }
+
+  const res = new MockResponse();
+  res.statusCode = status;
+
+  if (responseContentType !== null) {
+    res.setHeader("content-type", responseContentType);
+  }
+
+  middleware(request, res, () => {
+    res.send(responseBody);
+  });
+
+  return (await entryWritten).context;
+}
+
+const employee = {
+  name: "陳大文",
+  idNumber: "A123456789",
+  monthlySalary: 68000,
+  password: "hunter2"
+};
+
+test("request logger records full bodies when a route opts in", async () => {
+  const context = await captureEntry({
+    req: { body: employee },
+    apiRoute: { logging: { bodyCapture: "full" } },
+    responseBody: { ok: true, token: "response-secret" }
+  });
+
+  assert.deepEqual(context.input.body, { ...employee, password: "[REDACTED]" });
+  assert.equal(context.output.body.token, "[REDACTED]");
+  assert.equal(context.bodyCapture, "full");
+});
+
+test("request logger records full bodies on any error status", async () => {
+  for (const status of [400, 409, 500, 503]) {
+    const context = await captureEntry({
+      req: { body: employee },
+      status,
+      responseBody: { success: false, error: { code: "X" } }
+    });
+
+    assert.deepEqual(
+      context.input.body,
+      { ...employee, password: "[REDACTED]" },
+      `HTTP ${status} must keep the request body for reproduction`
+    );
+    assert.equal(context.output.body.error.code, "X");
+  }
+});
+
+test("request logger keeps successful bodies out of the log", async () => {
+  for (const status of [200, 201, 204, 304]) {
+    const context = await captureEntry({
+      req: { body: employee },
+      status,
+      responseBody: { data: { idNumber: "A123456789" } }
+    });
+
+    assert.equal(context.input.body, "[NOT_LOGGED]", `HTTP ${status} leaked the request body`);
+    assert.equal(context.output.body, "[NOT_LOGGED]", `HTTP ${status} leaked the response body`);
+  }
+});
+
+test("request logger never records file uploads or downloads", async () => {
+  // 上傳：即使 route 要求 full，也不記錄。
+  const upload = await captureEntry({
+    req: {
+      headers: { "content-type": "multipart/form-data; boundary=x" },
+      body: { file: "binary-ish" }
+    },
+    apiRoute: { logging: { bodyCapture: "full" } },
+    responseBody: { ok: true }
+  });
+  assert.equal(upload.input.body, "[FILE_TRANSFER]");
+
+  // 下載：即使是錯誤狀態碼，也不記錄二進位回應。
+  const download = await captureEntry({
+    req: { body: { reportId: 7 } },
+    status: 500,
+    responseContentType: "application/pdf",
+    responseBody: Buffer.from("%PDF-1.7 binary")
+  });
+  assert.equal(download.output.body, "[FILE_TRANSFER]");
+  // 請求本身是 JSON，錯誤時仍應保留以便重現。
+  assert.deepEqual(download.input.body, { reportId: 7 });
+
+  // Buffer 回應在沒有 content-type 時同樣視為檔案。
+  const buffered = await captureEntry({
+    req: { body: {} },
+    status: 500,
+    responseContentType: null,
+    responseBody: Buffer.from("raw")
+  });
+  assert.equal(buffered.output.body, "[FILE_TRANSFER]");
+});
+
+test("request logger honours a disabled error-status override", async () => {
+  const context = await captureEntry({
+    config: { bodyCaptureErrorStatus: null },
+    req: { body: employee },
+    status: 500,
+    responseBody: { success: false }
+  });
+
+  assert.equal(context.input.body, "[NOT_LOGGED]");
+  assert.equal(context.output.body, "[NOT_LOGGED]");
 });
 
 test("request logger redacts sensitive query values in the logged URL", async () => {

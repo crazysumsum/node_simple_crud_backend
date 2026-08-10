@@ -27,6 +27,19 @@ const loggingConfig = {
       // Request middleware 產生 info 級別日誌，因此通常設定為 info。
       minimumLevel: "info",
 
+      // 成功請求是否記錄 request／response body。
+      // "none"：不記錄（預設）。業務 body 裝的是身分證號、薪資、銀行帳號這類
+      //   個資，而 redactedFields 是黑名單、只擋得住列舉得出的欄位名。
+      // "full"：完整記錄，敏感欄位仍依 redactedFields 遮蔽。
+      // 個別 API 可在 Handler 的 static api.logging.bodyCapture 覆蓋此預設值。
+      bodyCapture: "none",
+
+      // 回應狀態碼大於或等於此值時，一律完整記錄 body 以便重現問題，
+      // 不受上面的 bodyCapture 或 route 設定影響。設為 null 可停用此行為。
+      // 注意：400 代表驗證失敗的請求也會完整落盤，包含使用者填寫的個資。
+      // 這是以除錯便利性換取的取捨；若不接受可改為 500 或 null。
+      bodyCaptureErrorStatus: 400,
+
       // 需要遮蔽的敏感欄位名稱，不分英文字母大小寫比對。
       redactedFields: [
         "password",
