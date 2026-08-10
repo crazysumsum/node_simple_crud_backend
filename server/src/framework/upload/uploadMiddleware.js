@@ -3,7 +3,6 @@ import { chmod, mkdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import busboy from "busboy";
 import { ApplicationError } from "../errors/ApplicationError.js";
-import { SIGNATURE_SAMPLE_BYTES } from "./signatureMatchers.js";
 
 export class UploadError extends ApplicationError {
   constructor(code, message, statusCode = 400) {
@@ -146,7 +145,8 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
             const reason = fileTypes.rejectionReason({
               mimeType: declared,
               fileName: filename,
-              sample: buffer.subarray(0, SIGNATURE_SAMPLE_BYTES)
+              // 完整內容：OLE2 這類格式的特徵可能落在檔案尾端。
+              content: buffer
             });
 
             if (reason) {

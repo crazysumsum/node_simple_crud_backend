@@ -384,6 +384,83 @@ test("a handler cannot return a file without declaring download.enabled", async 
   assert.equal((await response.json()).error.code, "INTERNAL_SERVER_ERROR");
 });
 
+test("built-in legacy Office types are distinguished from other OLE2 files", async () => {
+  const { FileTypeService } = await import(
+    "../src/services/filetype/FileTypeService.js"
+  );
+  const fileTypes = new FileTypeService({});
+  const OLE2_HEADER = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  // CFB 的目錄項目名稱以 UTF-16LE 儲存，且不一定落在檔案開頭附近。
+  const ole2With = (streamName) =>
+    Buffer.concat([
+      OLE2_HEADER,
+      Buffer.alloc(2048),
+      Buffer.from(streamName, "utf16le"),
+      Buffer.alloc(512)
+    ]);
+  const check = (mimeType, fileName, content) =>
+    fileTypes.rejectionReason({ mimeType, fileName, content });
+
+  assert.equal(check("application/vnd.ms-excel", "a.xls", ole2With("Workbook")), null);
+  assert.equal(check("application/msword", "a.doc", ole2With("WordDocument")), null);
+  assert.equal(
+    check("application/vnd.ms-powerpoint", "a.ppt", ole2With("PowerPoint Document")),
+    null
+  );
+
+  // 與 OOXML 不同，舊版格式彼此可以區分。
+  assert.match(
+    check("application/msword", "a.doc", ole2With("Workbook")),
+    /content does not match/
+  );
+
+  // OLE2 容器但沒有 Office stream——.msi 安裝檔就是這個形狀，必須擋下。
+  assert.match(
+    check("application/vnd.ms-excel", "setup.xls", Buffer.concat([OLE2_HEADER, Buffer.alloc(2048)])),
+    /content does not match/,
+    "a bare OLE2 container must not pass as a spreadsheet"
+  );
+});
+
+test("built-in archive types match their container signatures", async () => {
+  const { FileTypeService } = await import(
+    "../src/services/filetype/FileTypeService.js"
+  );
+  const fileTypes = new FileTypeService({});
+  const withHeader = (bytes) => Buffer.concat([Buffer.from(bytes), Buffer.alloc(32)]);
+  const check = (mimeType, fileName, content) =>
+    fileTypes.rejectionReason({ mimeType, fileName, content });
+
+  const archives = [
+    ["application/x-7z-compressed", "a.7z", [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]],
+    ["application/vnd.rar", "a.rar", [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]],
+    ["application/vnd.rar", "a.rar", [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00]],
+    ["application/gzip", "a.gz", [0x1f, 0x8b, 0x08]],
+    ["application/x-bzip2", "a.bz2", [0x42, 0x5a, 0x68]],
+    ["application/x-xz", "a.xz", [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]]
+  ];
+
+  for (const [mimeType, fileName, bytes] of archives) {
+    assert.equal(check(mimeType, fileName, withHeader(bytes)), null, `${fileName} rejected`);
+    assert.match(
+      check(mimeType, fileName, Buffer.from("definitely not an archive")),
+      /content does not match/,
+      `${mimeType} accepted a non-archive`
+    );
+  }
+
+  // 副檔名只取最後一段，所以 .tar.gz 走 .gz 規則。
+  assert.equal(check("application/gzip", "backup.tar.gz", withHeader([0x1f, 0x8b, 0x08])), null);
+  assert.equal(check("application/gzip", "backup.tgz", withHeader([0x1f, 0x8b, 0x08])), null);
+
+  // tar 的 magic 在位移 257，不是開頭。
+  const tar = Buffer.alloc(1024);
+  tar.write("archive-entry.txt", 0, "latin1");
+  tar.write("ustar", 257, "latin1");
+  assert.equal(check("application/x-tar", "a.tar", tar), null);
+  assert.match(check("application/x-tar", "a.tar", Buffer.alloc(1024)), /content does not match/);
+});
+
 test("upload config rejects types the file type service does not know", async () => {
   const { normalizeUploadConfig } = await import(
     "../src/framework/upload/normalizeUploadConfig.js"
@@ -415,7 +492,7 @@ test("file type service registers custom types and refuses silent overrides", as
   const { FileTypeService } = await import(
     "../src/services/filetype/FileTypeService.js"
   );
-  const { isOle2Container } = await import(
+  const { isOle2WithStream } = await import(
     "../src/framework/upload/signatureMatchers.js"
   );
   const fileTypes = new FileTypeService({});
@@ -424,37 +501,40 @@ test("file type service registers custom types and refuses silent overrides", as
   assert.ok(fileTypes.has("application/pdf"));
   assert.deepEqual(fileTypes.extensionsFor("application/pdf"), [".pdf"]);
 
-  fileTypes.register("application/vnd.ms-excel", {
-    extensions: [".xls"],
-    matches: isOle2Container
+  // Visio 不在內建清單內，是真正的「自訂型別」情境。
+  assert.equal(fileTypes.has("application/vnd.visio"), false);
+  fileTypes.register("application/vnd.visio", {
+    extensions: [".vsd"],
+    matches: isOle2WithStream(["VisioDocument"])
   });
 
-  const ole2 = Buffer.concat([
+  const visio = Buffer.concat([
     Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
-    Buffer.alloc(16)
+    Buffer.alloc(1024),
+    Buffer.from("VisioDocument", "utf16le")
   ]);
   assert.equal(
     fileTypes.rejectionReason({
-      mimeType: "application/vnd.ms-excel",
-      fileName: "ledger.xls",
-      sample: ole2
+      mimeType: "application/vnd.visio",
+      fileName: "layout.vsd",
+      content: visio
     }),
     null
   );
   // 副檔名與內容仍然分別校驗。
   assert.match(
     fileTypes.rejectionReason({
-      mimeType: "application/vnd.ms-excel",
-      fileName: "ledger.xlsx",
-      sample: ole2
+      mimeType: "application/vnd.visio",
+      fileName: "layout.vsdx",
+      content: visio
     }),
     /extension does not match/
   );
   assert.match(
     fileTypes.rejectionReason({
-      mimeType: "application/vnd.ms-excel",
-      fileName: "ledger.xls",
-      sample: Buffer.from("not an OLE2 file")
+      mimeType: "application/vnd.visio",
+      fileName: "layout.vsd",
+      content: Buffer.from("not an OLE2 file")
     }),
     /content does not match/
   );
@@ -481,24 +561,25 @@ test("a custom type registered in the service is accepted end to end", async (t)
   const uploadDirectory = await mkdtemp(path.join(os.tmpdir(), "erp-custom-type-"));
   t.after(() => rm(uploadDirectory, { recursive: true, force: true }));
 
-  // OLE2 開頭的舊版 Excel，預設不在內建清單內。
-  const XLS = Buffer.concat([
+  // Visio 不在內建清單內，必須由 registerCustomTypes() 或注入才可用。
+  const VSD = Buffer.concat([
     Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
-    Buffer.alloc(32)
+    Buffer.alloc(1024),
+    Buffer.from("VisioDocument", "utf16le")
   ]);
 
   class LedgerHandler extends BaseRequestHandler {
     static handlerName = "uploadLedger";
     static api = {
       method: "POST",
-      path: "/api/v1/ledgers",
-      description: "Accept a legacy Excel ledger.",
+      path: "/api/v1/diagrams",
+      description: "Accept a Visio diagram.",
       authType: "public",
       authorizationPolicies: [{ name: "allowAll", options: {} }],
       upload: {
         enabled: true,
         directory: uploadDirectory,
-        allowedMimeTypes: ["application/vnd.ms-excel"]
+        allowedMimeTypes: ["application/vnd.visio"]
       },
       requestSchema: { body: { type: "object", additionalProperties: true } },
       responseSchema: { 201: { type: "object", additionalProperties: true } }
@@ -509,7 +590,7 @@ test("a custom type registered in the service is accepted end to end", async (t)
     }
   }
 
-  const { isOle2Container } = await import(
+  const { isOle2WithStream } = await import(
     "../src/framework/upload/signatureMatchers.js"
   );
   const source = defaultConfigurationSource();
@@ -526,7 +607,10 @@ test("a custom type registered in the service is accepted end to end", async (t)
     serviceOptions: {
       filetypes: {
         types: {
-          "application/vnd.ms-excel": { extensions: [".xls"], matches: isOle2Container }
+          "application/vnd.visio": {
+            extensions: [".vsd"],
+            matches: isOle2WithStream(["VisioDocument"])
+          }
         }
       },
       mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
@@ -541,17 +625,17 @@ test("a custom type registered in the service is accepted end to end", async (t)
 
   const { url } = await application.start();
   const data = new FormData();
-  data.append("file", new Blob([XLS], { type: "application/vnd.ms-excel" }), "ledger.xls");
-  const response = await fetch(`${url}/api/v1/ledgers`, { method: "POST", body: data });
+  data.append("file", new Blob([VSD], { type: "application/vnd.visio" }), "layout.vsd");
+  const response = await fetch(`${url}/api/v1/diagrams`, { method: "POST", body: data });
   const body = await response.json();
 
   assert.equal(response.status, 201);
-  assert.match(body.data.stored, /^[0-9a-f-]{36}\.xls$/);
+  assert.match(body.data.stored, /^[0-9a-f-]{36}\.vsd$/);
 
   // 同一條 route 仍然拒絕內容不符的檔案。
   const bad = new FormData();
-  bad.append("file", new Blob([Buffer.from("plain text")], { type: "application/vnd.ms-excel" }), "ledger.xls");
-  const rejected = await fetch(`${url}/api/v1/ledgers`, { method: "POST", body: bad });
+  bad.append("file", new Blob([Buffer.from("plain text")], { type: "application/vnd.visio" }), "layout.vsd");
+  const rejected = await fetch(`${url}/api/v1/diagrams`, { method: "POST", body: bad });
   assert.equal(rejected.status, 415);
   assert.equal((await rejected.json()).error.code, "UPLOAD_TYPE_MISMATCH");
 });

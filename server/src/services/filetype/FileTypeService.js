@@ -1,10 +1,4 @@
 import { BaseService } from "../../framework/services/BaseService.js";
-import {
-  isOoxml,
-  isProbablyText,
-  isZipContainer,
-  startsWith
-} from "../../framework/upload/signatureMatchers.js";
 import { BUILT_IN_FILE_TYPES } from "./builtInFileTypes.js";
 
 /**
@@ -51,25 +45,27 @@ export class FileTypeService extends BaseService {
    * 一個型別由三部分組成：
    *   - MIME type：必須與客戶端宣告的值完全相符，小寫。
    *   - extensions：允許的副檔名，含點號、小寫。第一個會成為落盤時的副檔名。
-   *   - matches(buffer)：收到檔案開頭 4096 bytes，回傳 boolean。
+   *   - matches(buffer)：收到完整檔案內容，回傳 boolean。
    *
-   * 可用的比對原語從 framework/upload/signatureMatchers.js 匯入：
-   * startsWith、isZipContainer、isOoxml、isOle2Container、isProbablyText。
+   * 可用的比對原語從 framework/upload/signatureMatchers.js 匯入：startsWith、
+   * hasAsciiAt、isZipContainer、isOoxml、isOle2Container、isOle2WithStream、
+   * isProbablyText。
    *
-   * 範例——加入舊版 Excel：
+   * 範例——加入 Visio 圖檔（同樣是 OLE2 容器）：
    *
-   *   import { isOle2Container } from "../../framework/upload/signatureMatchers.js";
+   *   import { isOle2WithStream } from "../../framework/upload/signatureMatchers.js";
    *
-   *   this.register("application/vnd.ms-excel", {
-   *     extensions: [".xls"],
-   *     matches: isOle2Container
+   *   this.register("application/vnd.visio", {
+   *     extensions: [".vsd"],
+   *     matches: isOle2WithStream(["VisioDocument"])
    *   });
    *
    * 加入型別前請先確認兩件事：
    *
    * 1. 這個簽章是否被其他格式共用？OLE2 的開頭同時屬於 .xls、.doc、.ppt 與
    *    .msi 安裝檔，ZIP 的開頭同時屬於 .zip 與所有 OOXML。放行一個等於放行
-   *    一整類，要精確分辨得解析容器內部結構。
+   *    一整類——內建的 OLE2 型別因此改用 isOle2WithStream() 再比對內部 stream
+   *    名稱，你的自訂型別若共用容器簽章也應該比照處理。
    * 2. 這是純文字格式嗎？CSV、JSON、XML、SVG 都沒有簽章，isProbablyText 只能
    *    排除二進位內容。SVG 尤其危險，它是 XML 且可以內嵌 <script>——若要允許，
    *    下載時務必強制 attachment 而非 inline。
@@ -77,9 +73,9 @@ export class FileTypeService extends BaseService {
   registerCustomTypes() {
     // 在此新增專案自訂的檔案型別，例如：
     //
-    // this.register("application/vnd.ms-excel", {
-    //   extensions: [".xls"],
-    //   matches: isOle2Container
+    // this.register("image/heic", {
+    //   extensions: [".heic"],
+    //   matches: (buffer) => hasAsciiAt(buffer, 4, "ftypheic")
     // });
   }
 
@@ -144,7 +140,7 @@ export class FileTypeService extends BaseService {
    * 宣告型別、副檔名與實際內容三者必須一致。
    * 回傳 null 代表通過，否則回傳可直接對外顯示的原因。
    */
-  rejectionReason({ mimeType, fileName, sample }) {
+  rejectionReason({ mimeType, fileName, content }) {
     const type = String(mimeType || "").toLowerCase();
     const definition = this.types.get(type);
 
@@ -159,13 +155,10 @@ export class FileTypeService extends BaseService {
       return `file extension does not match ${type}`;
     }
 
-    if (!definition.matches(sample)) {
+    if (!definition.matches(content)) {
       return `file content does not match ${type}`;
     }
 
     return null;
   }
 }
-
-// 讓自訂型別能直接從 service 檔案取用原語，不必再回頭找 framework 路徑。
-export { isOoxml, isProbablyText, isZipContainer, startsWith };

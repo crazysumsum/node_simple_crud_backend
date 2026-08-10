@@ -426,14 +426,39 @@ boolean. `signatureMatchers.js` provides `startsWith`, `isZipContainer`, `isOoxm
 explicit `{ override: true }`, so loosening a check is never accidental. Built-in
 types are listed separately in `builtInFileTypes.js`.
 
+`matches` receives the **complete** file, not a prefix: the upload middleware buffers
+it before validating, and formats like OLE2 keep their identifying data near the end.
+
 Two things to check before adding a type:
 
-- **Is the signature shared?** OLE2 (`D0 CF 11 E0`) covers `.xls`, `.doc`, `.ppt` and
-  `.msi` installers; a ZIP header covers `.zip` and every OOXML format. Allowing one
-  allows the whole class. Telling them apart means parsing the container.
+- **Is the signature shared?** A ZIP header covers `.zip` and every OOXML format;
+  OLE2 (`D0 CF 11 E0`) covers `.xls`, `.doc`, `.ppt` and `.msi` installers. Allowing
+  the container allows the whole class. The built-in OLE2 types therefore use
+  `isOle2WithStream()` to also require an Office stream name, which is what keeps a
+  renamed `.msi` out; do the same for custom types that share a container.
 - **Is it plain text?** CSV, JSON, XML and SVG have no signature, so `isProbablyText`
   can only rule out binary content — it will not catch CSV formula injection. SVG is
   XML and can embed `<script>`, so serve it as an attachment, never inline.
+
+### Built-In Types
+
+| Group | Types | Verification |
+| --- | --- | --- |
+| Documents | `.pdf` | unique signature |
+| Images | `.png` `.jpg`/`.jpeg` `.gif` `.webp` | unique signature |
+| Office 2007+ | `.xlsx` `.docx` `.pptx` | ZIP + OOXML marker — **not distinguishable from each other** |
+| Office 2003− | `.xls` `.doc` `.ppt` | OLE2 + Office stream name — distinguishable, and excludes `.msi` |
+| Archives | `.zip` `.7z` `.rar` `.gz`/`.tgz` `.tar` `.bz2` `.xz` | container signature only |
+| Text | `.csv` `.txt` | no signature; binary content ruled out |
+
+Archives are verified as containers, not by their contents. Allowing an archive allows
+whatever is inside it, so handle zip bombs and traversal in entry names when you
+extract. Extension matching uses the last segment only, so `backup.tar.gz` is checked
+against `.gz`.
+
+Registration is not the same as permission: a route only accepts what its
+`allowedMimeTypes` lists, which defaults to PDF, PNG, JPEG and `.xlsx` in
+`config/api.js`.
 
 Other guarantees:
 
