@@ -333,7 +333,6 @@ function mergeServiceValues(...sources) {
 export async function createApplication({
   configurationSource = defaultConfigurationSource(),
   environment = process.env.NODE_ENV || "development",
-  environmentSecret = process.env.JWT_SECRET,
   routes,
   handlers,
   handlerServices,
@@ -359,8 +358,7 @@ export async function createApplication({
   forceExit = (code) => process.exit(code)
 } = {}) {
   const configuration = validateApplicationConfiguration(configurationSource, {
-    environment,
-    environmentSecret
+    environment
   });
   const customValues = mergeServiceValues(
     handlerServices,
@@ -522,6 +520,10 @@ export async function createApplication({
       app.use(helmet());
     }
 
+    // CORS 必須排在會提前終止請求的中間件之前。放在後面時，429 與 426 這類
+    // 回應不會帶 Access-Control-Allow-Origin，瀏覽器只會看到沒有細節的
+    // network error，前端無法讀取狀態碼或 Retry-After 做退避處理。
+    app.use(cors(createCorsOptions(security)));
     app.use(createHttpsEnforcementMiddleware(security));
     app.use(activeRequestLimiter.middleware());
     app.use(
@@ -532,7 +534,6 @@ export async function createApplication({
         shutdownTimeoutMs: configuration.application.shutdownTimeoutMs
       })
     );
-    app.use(cors(createCorsOptions(security)));
     app.use(express.json({ limit: security.jsonBodyLimit }));
     app.use(apiDispatcher);
     // apiDispatcher 已處理 /api 下的所有請求，走到這裡的都是框架不認識的路徑。
@@ -568,10 +569,10 @@ export async function createApplication({
           "requestLogger",
           "requestContext",
           ...(security.helmetEnabled ? ["helmet"] : []),
+          "cors",
           "httpsEnforcement",
           "requestLimiter",
           "requestServiceScope",
-          "cors",
           "jsonParser",
           "apiDispatcher",
           "notFound",

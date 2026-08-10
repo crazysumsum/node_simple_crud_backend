@@ -63,8 +63,7 @@ test("logging configuration accepts additional named logger profiles", () => {
 test("production response validation is secure by default and can be explicitly disabled", () => {
   const source = defaultConfigurationSource();
   const enabled = validateApplicationConfiguration(source, {
-    environment: "production",
-    environmentSecret: "production-secret-with-more-than-32-characters"
+    environment: "production"
   });
   const disabled = validateApplicationConfiguration(
     {
@@ -80,10 +79,7 @@ test("production response validation is secure by default and can be explicitly 
         }
       }
     },
-    {
-      environment: "production",
-      environmentSecret: "production-secret-with-more-than-32-characters"
-    }
+    { environment: "production" }
   );
 
   assert.equal(enabled.request.validation.output.runtimeEnabled, true);
@@ -143,18 +139,43 @@ test("global configuration validation reports errors from multiple sections", ()
   );
 });
 
-test("production configuration requires JWT_SECRET from the environment", () => {
+test("every environment requires JWT_SECRET, not just production", () => {
+  const source = defaultConfigurationSource();
+  // 沒有 JWT_SECRET 時，config/jwt.js 的 secret 就是 undefined。
+  const withoutSecret = { ...source, jwt: { ...source.jwt, secret: undefined } };
+
+  // development 是 NODE_ENV 未設定時的預設值，正是舊實作會靜默放行的情況。
+  for (const environment of ["development", "test", "staging", "production"]) {
+    assert.throws(
+      () => validateApplicationConfiguration(withoutSecret, { environment }),
+      (error) => {
+        assert.ok(error instanceof ConfigurationError);
+        assert.equal(error.details[0].section, "jwt");
+        assert.match(error.details[0].message, /JWT_SECRET is required/);
+        return true;
+      },
+      `expected ${environment} to reject a missing JWT_SECRET`
+    );
+  }
+
+  // 空白字元不算有效密鑰。
   assert.throws(
     () =>
-      validateApplicationConfiguration(defaultConfigurationSource(), {
-        environment: "production",
-        environmentSecret: ""
+      validateApplicationConfiguration({
+        ...source,
+        jwt: { ...source.jwt, secret: "   " }
       }),
-    (error) => {
-      assert.ok(error instanceof ConfigurationError);
-      assert.equal(error.details[0].section, "jwt");
-      assert.match(error.details[0].message, /JWT_SECRET is required/);
-      return true;
-    }
+    ConfigurationError
+  );
+});
+
+test("configuration ships no fallback JWT secret", async () => {
+  const { default: jwtConfig } = await import("../config/jwt.js");
+
+  // 寫死的密鑰等同公開，任何人都能據此簽發任意 role 的 Token。
+  assert.equal(jwtConfig.secret, process.env.JWT_SECRET);
+  assert.ok(
+    !Object.hasOwn(jwtConfig, "requireEnvironmentSecretInProduction"),
+    "the NODE_ENV-gated opt-out must not come back"
   );
 });

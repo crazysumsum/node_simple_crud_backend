@@ -176,7 +176,9 @@ registered Handler definition return a generic HTTP 401 `Unauthorized Access`
 response.
 
 The built-in authentication types are `public` and `jwt`. JWT settings are stored in
-`server/config/jwt.js`; production secrets must be supplied through `JWT_SECRET`.
+`server/config/jwt.js`. `JWT_SECRET` is required in every environment and has no
+built-in default, so the application refuses to start without it. Generate one with
+`openssl rand -base64 48`.
 After a successful login, handlers can call `issueAccessToken` from
 `server/src/framework/auth/jwtService.js`.
 
@@ -495,17 +497,30 @@ The proxy must replace, rather than append untrusted values to,
 when HTTPS enforcement relies on forwarded headers. Keep `TRUST_PROXY=false` and
 `ENFORCE_HTTPS=false` for direct local HTTP development.
 
-## Dependency Security
+## Verification
 
-Run the high-severity dependency vulnerability gate locally:
+`npm run verify` runs the same three gates as CI, in the same order:
 
 ```bash
-npm run security:audit
+npm run verify
 ```
 
-`npm run security:check` runs both the audit and backend tests. GitHub Actions also
-runs the audit on pull requests, pushes to `main`, manual dispatches, and every
-Monday through `.github/workflows/security-audit.yml`.
+| Gate | Command | Fails on |
+| --- | --- | --- |
+| Lint | `npm run lint` | any ESLint error (`eslint.config.js`) |
+| Tests + coverage | `npm run test:coverage` | a failing test, or coverage under 85% lines / 68% branches / 82% functions |
+| Dependencies | `npm run security:audit` | a high or critical advisory |
+
+`npm run lint:fix` applies the autofixable subset. `npm test` runs the suite without
+coverage thresholds for a faster inner loop.
+
+The lint rules target defects rather than formatting, because the framework leans on
+duck typing that no type checker is validating. Coverage thresholds sit just under
+the current numbers so they catch regressions without failing on noise; raise them
+as coverage improves.
+
+GitHub Actions runs all three on pull requests, pushes to `main`, manual dispatches,
+and every Monday through `.github/workflows/security-audit.yml`.
 
 ## Application Factory
 
@@ -534,7 +549,7 @@ All seven global configuration sections are normalized and validated together be
 runtime resources are created: application, API, database, JWT, logging, security,
 and the unified request lifecycle configuration. Invalid startup configuration throws
 `ConfigurationError` with a `details` array containing every invalid section.
-Production startup also requires `JWT_SECRET` from the environment.
+Startup in every environment also requires `JWT_SECRET`.
 
 ## MySQL Database Service
 

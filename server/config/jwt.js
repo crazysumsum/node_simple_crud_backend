@@ -1,12 +1,8 @@
 const jwtConfig = {
-  // JWT 簽署及驗證密鑰。正式環境必須透過 JWT_SECRET 提供高強度隨機值，
-  // 不可使用下面只供本機開發的預設密鑰，也不可提交正式密鑰到版本控制。
-  secret:
-    process.env.JWT_SECRET ||
-    "erp-local-development-jwt-secret-change-before-production",
-
-  // 正式環境是否強制要求 JWT_SECRET 環境變數。保持 true 可防止正式系統誤用開發密鑰。
-  requireEnvironmentSecretInProduction: true,
+  // JWT 簽署及驗證密鑰，一律由 JWT_SECRET 環境變數提供，至少 32 個字元。
+  // 這裡刻意沒有預設值：任何寫進版本控制的密鑰都等同公開，能讓任何人自行簽發
+  // 任意 role 及 permission 的 Token。未設定時應用程式會在啟動時直接失敗。
+  secret: process.env.JWT_SECRET,
 
   // Token 簽發者，用來防止其他系統簽發的 Token 被本 API 接受。
   issuer: process.env.JWT_ISSUER || "erp-api",

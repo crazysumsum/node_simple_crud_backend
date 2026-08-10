@@ -198,6 +198,56 @@ test("application factory builds a startable and stoppable API with injected res
   );
 });
 
+test("responses that short-circuit the request still carry CORS headers", async (t) => {
+  const source = defaultConfigurationSource();
+  const allowedOrigin = "http://localhost:5173";
+  const application = await createApplication({
+    configurationSource: {
+      ...source,
+      application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 },
+      request: {
+        ...source.request,
+        // 一個窗口只允許一次請求，第二次必定被限流。
+        limits: {
+          ...source.request.limits,
+          maxRequestsPerIpPerWindow: 1,
+          ipWindowMs: 60000
+        }
+      }
+    },
+    logger: memoryLogger(),
+    requestLogger: testRequestLogger(),
+    serviceOptions: {
+      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+    },
+    forceExit: () => {
+      throw new Error("Factory test must not force exit");
+    }
+  });
+  t.after(() => application.shutdown("test_cleanup"));
+
+  const { url } = await application.start();
+  const headers = { Origin: allowedOrigin };
+  const allowed = await fetch(`${url}/api/v1/health`, { headers });
+  const limited = await fetch(`${url}/api/v1/health`, { headers });
+
+  assert.equal(allowed.status, 200);
+  assert.equal(
+    allowed.headers.get("access-control-allow-origin"),
+    allowedOrigin
+  );
+
+  // 沒有這個標頭，瀏覽器只會給前端一個沒有細節的 network error，
+  // 讀不到 429 也讀不到 Retry-After，無法實作退避。
+  assert.equal(limited.status, 429);
+  assert.equal(
+    limited.headers.get("access-control-allow-origin"),
+    allowedOrigin,
+    "rate-limited responses must be readable by the browser"
+  );
+  assert.ok(limited.headers.get("retry-after"));
+});
+
 test("business handlers and auth strategies are auto-discovered from implementations", async (t) => {
   let strategyInstances = 0;
   let strategyCloseCalls = 0;

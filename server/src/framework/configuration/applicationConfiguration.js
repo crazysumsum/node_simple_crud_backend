@@ -28,7 +28,7 @@ export function defaultConfigurationSource() {
 
 export function validateApplicationConfiguration(
   source = defaultConfigurationSource(),
-  { environment = process.env.NODE_ENV || "development", environmentSecret = process.env.JWT_SECRET } = {}
+  { environment = process.env.NODE_ENV || "development" } = {}
 ) {
   const details = [];
   const normalized = {};
@@ -45,9 +45,7 @@ export function validateApplicationConfiguration(
   );
   validateSection("api", () => normalizeApiConfig(source?.api));
   validateSection("database", () => normalizeDatabaseConfig(source?.database));
-  validateSection("jwt", () =>
-    normalizeJwtConfig(source?.jwt, { environment, environmentSecret })
-  );
+  validateSection("jwt", () => normalizeJwtConfig(source?.jwt));
   validateSection("logging", () => normalizeLoggingConfig(source?.logging));
   validateSection("request", () =>
     normalizeRequestConfig(source?.request, { environment })

@@ -10,24 +10,21 @@ function requiredText(value, key) {
   return text;
 }
 
-export function normalizeJwtConfig(
-  source,
-  { environment = process.env.NODE_ENV || "development", environmentSecret } = {}
-) {
-  const secret = requiredText(source?.secret, "secret");
+export function normalizeJwtConfig(source) {
+  // 密鑰在每個環境都是必要的。舊版只在 NODE_ENV=production 時強制，而 NODE_ENV
+  // 未設定時會落回 "development"，等於漏設環境變數就會靜默採用一組寫死的密鑰。
+  if (!String(source?.secret || "").trim()) {
+    throw new Error(
+      "JWT_SECRET is required. Set it to a random value of at least 32 characters."
+    );
+  }
+
+  const secret = requiredText(source.secret, "secret");
   const algorithm = requiredText(source?.algorithm, "algorithm");
   const clockToleranceSeconds = Number(source?.clockToleranceSeconds);
 
   if (secret.length < 32) {
     throw new Error("JWT config secret must contain at least 32 characters");
-  }
-
-  if (
-    environment === "production" &&
-    source?.requireEnvironmentSecretInProduction !== false &&
-    !environmentSecret
-  ) {
-    throw new Error("JWT_SECRET is required when NODE_ENV=production");
   }
 
   if (!SUPPORTED_ALGORITHMS.has(algorithm)) {
@@ -42,8 +39,6 @@ export function normalizeJwtConfig(
 
   return Object.freeze({
     secret,
-    requireEnvironmentSecretInProduction:
-      source?.requireEnvironmentSecretInProduction !== false,
     issuer: requiredText(source?.issuer, "issuer"),
     audience: requiredText(source?.audience, "audience"),
     algorithm,

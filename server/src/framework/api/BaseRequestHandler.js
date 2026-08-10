@@ -36,9 +36,8 @@ function directResponseError(handlerName, operation) {
 }
 
 function handlerResponseView(res, handlerName) {
-  let proxy;
-
-  proxy = new Proxy(res, {
+  // get trap 只會在 proxy 初始化之後才被呼叫，所以在 trap 內引用 proxy 是安全的。
+  const proxy = new Proxy(res, {
     get(target, property) {
       if (RESPONSE_WRITE_METHODS.has(property)) {
         return () => {
@@ -95,7 +94,9 @@ export class BaseRequestHandler {
     this.time = optionalService(services, "time") || null;
   }
 
-  async handle(req, res, next) {
+  // dispatcher 仍以 (req, res, next) 呼叫，但 handler 不得自行呼叫 next——
+  // 它收到的是一個會拋錯的替身，因此這裡刻意不使用第三個參數。
+  async handle(req, res, _next) {
     if (!this.time || typeof this.time.now !== "function" || typeof this.time.timestamp !== "function") {
       throw new TypeError("Request handler requires a time service");
     }
@@ -109,7 +110,10 @@ export class BaseRequestHandler {
       null;
     let handlerError;
 
-    await this.logger?.info?.(
+    // 日誌落盤不應擋在請求路徑上。框架其他地方（dispatcher、限流、生命週期）
+    // 都用 void 送出，這裡先前的 await 會讓每個請求多等兩次檔案寫入。
+    this.writeLog(
+      "info",
       "request.handler.started",
       `Request handler started: ${this.handlerName}`,
       {
@@ -197,19 +201,36 @@ export class BaseRequestHandler {
           stack: handlerError.stack
         };
 
-        await this.logger?.error?.(
+        this.writeLog(
+          "error",
           "request.handler.finished",
           `Request handler failed: ${this.handlerName}`,
           context
         );
       } else {
-        await this.logger?.info?.(
+        this.writeLog(
+          "info",
           "request.handler.finished",
           `Request handler completed: ${this.handlerName}`,
           context
         );
       }
     }
+  }
+
+  // 送出日誌但不等待落盤。寫入失敗只記在 console，不可讓原本成功的請求失敗。
+  writeLog(level, event, message, context) {
+    const write = this.logger?.[level];
+
+    if (typeof write !== "function") {
+      return;
+    }
+
+    Promise.resolve(write.call(this.logger, event, message, context)).catch(
+      (error) => {
+        console.error(`Failed to record handler event: ${error.message}`);
+      }
+    );
   }
 
   async execute(_req, _res, _next) {

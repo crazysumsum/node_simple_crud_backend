@@ -217,6 +217,51 @@ test("file writer appends JSONL and removes expired log files", async (t) => {
   assert.deepEqual(JSON.parse(content.trim()), entry);
 });
 
+test("file writer reuses its resolved target instead of rescanning per write", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "erp-log-scan-"));
+  t.after(async () => {
+    const { rm } = await import("node:fs/promises");
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  // 保留期內累積的檔案：每筆都掃目錄的話，成本會隨這個數量上升。
+  for (let index = 0; index < 25; index += 1) {
+    await writeFile(path.join(directory, `other-2026-07-${index}.log`), "x\n", "utf8");
+  }
+
+  const writer = new FileLogWriter({
+    config: { ...baseConfig, directory, cleanupIntervalHours: 24 },
+    time
+  });
+  await writer.ready;
+
+  const entry = {
+    timestamp: time.timestamp(),
+    level: "info",
+    event: "http.request.completed",
+    message: "HTTP request completed",
+    context: {}
+  };
+  let scans = 0;
+  const resolveTarget = writer.resolveTarget.bind(writer);
+  writer.resolveTarget = (date) => {
+    scans += 1;
+    return resolveTarget(date);
+  };
+
+  for (let index = 0; index < 20; index += 1) {
+    await writer.write(entry);
+  }
+
+  assert.equal(scans, 1, "the directory must be scanned once, not per write");
+
+  const content = await readFile(
+    path.join(directory, `requests-${time.fileDate()}.log`),
+    "utf8"
+  );
+  assert.equal(content.trim().split("\n").length, 20);
+});
+
 test("file writer rotates logs before the size limit is exceeded", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "erp-rotating-logs-"));
   t.after(async () => {
