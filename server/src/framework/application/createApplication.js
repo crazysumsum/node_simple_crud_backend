@@ -28,11 +28,16 @@ import {
 import { RequestValidator } from "../validation/requestValidator.js";
 import { ResponseValidator } from "../validation/responseValidator.js";
 
-function closeHttpServer(server, timeoutMs) {
-  if (!server) {
-    return Promise.resolve(true);
-  }
-
+/**
+ * 執行一個關閉動作，並在逾時後放棄等待。
+ *
+ * 關閉流程的三種資源（HTTP server、限流器、idempotency store）先前各自複製了
+ * 同一段 promise 骨架：只結算一次、清掉計時器、成功回 true、失敗或逾時回 false。
+ * 差異只在「怎麼關」與「逾時要不要額外動作」，所以那兩點交給呼叫端。
+ *
+ * close 收到 finish(closedGracefully)，可同步或非同步呼叫；重複呼叫會被忽略。
+ */
+function closeWithTimeout(close, timeoutMs, { onTimeout } = {}) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (closedGracefully) => {
@@ -45,63 +50,47 @@ function closeHttpServer(server, timeoutMs) {
       resolve(closedGracefully);
     };
     const timeout = setTimeout(() => {
-      server.closeAllConnections?.();
+      onTimeout?.();
       finish(false);
     }, timeoutMs);
 
-    server.close((error) => finish(!error));
-    server.closeIdleConnections?.();
+    close(finish);
   });
 }
 
-function closeRequestLimiter(requestLimiter, timeoutMs) {
-  if (!requestLimiter?.close) {
+/**
+ * HTTP server 用 callback 式關閉，且要主動排空閒置連線；逾時則強制切斷所有
+ * 剩餘連線，否則 keep-alive 會讓 close() 永遠等不到。
+ */
+function closeHttpServer(server, timeoutMs) {
+  if (!server) {
     return Promise.resolve(true);
   }
 
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (closedGracefully) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      clearTimeout(timeout);
-      resolve(closedGracefully);
-    };
-    const timeout = setTimeout(() => finish(false), timeoutMs);
-
-    Promise.resolve(requestLimiter.close()).then(
-      () => finish(true),
-      () => finish(false)
-    );
-  });
+  return closeWithTimeout(
+    (finish) => {
+      server.close((error) => finish(!error));
+      server.closeIdleConnections?.();
+    },
+    timeoutMs,
+    { onTimeout: () => server.closeAllConnections?.() }
+  );
 }
 
-function closeIdempotencyManager(manager, timeoutMs) {
-  if (!manager?.close) {
+/** 任何提供 close() 的資源，例如限流 store 與 idempotency store。 */
+function closeResource(resource, timeoutMs) {
+  if (!resource?.close) {
     return Promise.resolve(true);
   }
 
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (closedGracefully) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      clearTimeout(timeout);
-      resolve(closedGracefully);
-    };
-    const timeout = setTimeout(() => finish(false), timeoutMs);
-
-    Promise.resolve(manager.close()).then(
-      () => finish(true),
-      () => finish(false)
-    );
-  });
+  return closeWithTimeout(
+    (finish) =>
+      Promise.resolve(resource.close()).then(
+        () => finish(true),
+        () => finish(false)
+      ),
+    timeoutMs
+  );
 }
 
 class Application {
@@ -214,11 +203,11 @@ class Application {
       activeRequestsDrainedPromise,
       httpServerClosedPromise
     ]);
-    const rateLimitStoreClosed = await closeRequestLimiter(
+    const rateLimitStoreClosed = await closeResource(
       this.requestLimiter,
       remainingTime()
     );
-    const idempotencyStoreClosed = await closeIdempotencyManager(
+    const idempotencyStoreClosed = await closeResource(
       this.idempotencyManager,
       remainingTime()
     );
