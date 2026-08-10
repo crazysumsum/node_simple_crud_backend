@@ -45,7 +45,7 @@ test("request timeout returns the standard 504 response and aborts req.requestTi
     createRequestTimeoutMiddleware({ timeoutMs: 20, logger, context, time }),
     async (req, res) => {
       requestSignal = req.requestTimeout.signal;
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      await new Promise((resolve) => { setTimeout(resolve, 60); });
 
       if (!res.headersSent) {
         sendSuccess(res, { completed: true }, { time });
@@ -66,5 +66,5 @@ test("request timeout returns the standard 504 response and aborts req.requestTi
   assert.equal(entries[0].event, "http.request_timeout");
   assert.equal(entries[0].context.timeoutMs, 20);
 
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await new Promise((resolve) => { setTimeout(resolve, 60); });
 });

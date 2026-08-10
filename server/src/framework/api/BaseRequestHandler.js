@@ -36,9 +36,8 @@ function directResponseError(handlerName, operation) {
 }
 
 function handlerResponseView(res, handlerName) {
-  let proxy;
-
-  proxy = new Proxy(res, {
+  // get trap 只會在 proxy 初始化之後才被呼叫，所以在 trap 內引用 proxy 是安全的。
+  const proxy = new Proxy(res, {
     get(target, property) {
       if (RESPONSE_WRITE_METHODS.has(property)) {
         return () => {
@@ -95,7 +94,9 @@ export class BaseRequestHandler {
     this.time = optionalService(services, "time") || null;
   }
 
-  async handle(req, res, next) {
+  // dispatcher 仍以 (req, res, next) 呼叫，但 handler 不得自行呼叫 next——
+  // 它收到的是一個會拋錯的替身，因此這裡刻意不使用第三個參數。
+  async handle(req, res, _next) {
     if (!this.time || typeof this.time.now !== "function" || typeof this.time.timestamp !== "function") {
       throw new TypeError("Request handler requires a time service");
     }

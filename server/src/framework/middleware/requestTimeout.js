@@ -39,7 +39,6 @@ export function createRequestTimeoutMiddleware({
     const controller = new AbortController();
     const startedAt = time.nowMs();
     const deadline = time.timestamp(time.at(startedAt + normalizedTimeoutMs));
-    let timer;
 
     req.requestTimeout = Object.freeze({
       timeoutMs: normalizedTimeoutMs,
@@ -69,7 +68,8 @@ export function createRequestTimeoutMiddleware({
     res.once("finish", onFinish);
     res.once("close", onClose);
 
-    timer = setTimeout(() => {
+    // cleanup 與 finish/close 監聽器都只會在這一行之後才執行，可安全宣告為 const。
+    const timer = setTimeout(() => {
       if (res.writableEnded || res.destroyed) {
         cleanup();
         return;

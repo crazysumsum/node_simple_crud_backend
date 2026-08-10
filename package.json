@@ -2,6 +2,7 @@
   "name": "erp-system",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "ERP development environment with Node.js, MySQL, and Vue 3.",
   "scripts": {
     "dev": "concurrently \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
@@ -10,6 +11,10 @@
     "install:all": "npm install",
     "db:init": "mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/init.sql",
     "test": "npm test --workspace server",
+    "test:coverage": "npm run test:coverage --workspace server",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "verify": "npm run lint && npm run test:coverage && npm run security:audit",
     "security:audit": "npm audit --audit-level=high",
     "security:check": "npm run security:audit && npm test --workspace server"
   },
@@ -18,7 +23,8 @@
     "server"
   ],
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "eslint": "^9.39.5"
   },
   "engines": {
     "node": ">=26"

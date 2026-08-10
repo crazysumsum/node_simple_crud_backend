@@ -176,7 +176,7 @@ test("request limiter rejects a queued request after its wait timeout", async ()
     throw new Error("Timed-out request must not start");
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await new Promise((resolve) => { setTimeout(resolve, 30); });
 
   assert.equal(queuedResponse.statusCode, 429);
   assert.equal(limiter.queue.length, 0);

@@ -225,7 +225,7 @@ test("transaction timeout is cleared before commit to avoid concurrent rollback"
     execute: async () => [{ affectedRows: 1 }],
     beginTransaction: async () => calls.push("begin"),
     commit: async () => {
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => { setTimeout(resolve, 25); });
       calls.push("commit");
     },
     rollback: async () => calls.push("rollback"),

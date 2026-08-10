@@ -30,5 +30,8 @@ jobs:
       - name: Scan dependencies
         run: npm run security:audit
 
-      - name: Run backend tests
-        run: npm test --workspace server
+      - name: Lint
+        run: npm run lint
+
+      - name: Run backend tests with coverage thresholds
+        run: npm run test:coverage
