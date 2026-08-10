@@ -165,6 +165,7 @@ export function createApiDispatcher({
   context,
   logger,
   time,
+  fileTypes,
   defaultRequestTimeoutMs = Number(applicationConfig.requestTimeoutMs)
 } = {}) {
   if (
@@ -238,14 +239,14 @@ export function createApiDispatcher({
     );
     const logging = normalizeRouteLogging(route.logging, routeKey);
     const upload = route.upload
-      ? normalizeUploadConfig(route.upload, `upload config for ${routeKey}`)
+      ? normalizeUploadConfig(route.upload, `upload config for ${routeKey}`, fileTypes)
       : null;
     const download = normalizeDownloadConfig(
       route.download || {},
       `download config for ${routeKey}`
     );
     const uploadMiddleware = upload?.enabled
-      ? createUploadMiddleware({ config: upload, logger: activeLogger })
+      ? createUploadMiddleware({ config: upload, logger: activeLogger, fileTypes })
       : null;
     const validateRequest = activeValidator.compile(route.requestSchema, routeKey);
     const validateResponse = activeResponseValidator.compile(

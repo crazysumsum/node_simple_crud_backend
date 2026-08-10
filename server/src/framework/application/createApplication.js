@@ -395,6 +395,7 @@ export async function createApplication({
   const activeRequestLogger = logging.requestMiddleware;
   const context = services.require("context");
   const time = services.require("time");
+  const fileTypes = services.require("filetypes");
   let activeStrategies = strategies;
 
   try {
@@ -499,6 +500,7 @@ export async function createApplication({
       context,
       logger: activeLogger,
       time,
+      fileTypes,
       defaultRequestTimeoutMs: configuration.application.requestTimeoutMs
     });
     const app = express();

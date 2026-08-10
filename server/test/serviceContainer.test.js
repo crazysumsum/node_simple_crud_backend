@@ -150,6 +150,11 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["time"]
     },
     {
+      name: "filetypes",
+      lifecycle: "singleton",
+      dependencies: []
+    },
+    {
       name: "logging",
       lifecycle: "singleton",
       dependencies: ["time"]

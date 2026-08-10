@@ -1,6 +1,5 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isSupportedMimeType, supportedMimeTypes } from "./fileSignatures.js";
 
 const serverRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -29,11 +28,18 @@ function permissionMode(value, key, label, fallback) {
 }
 
 /**
- * 上傳設定的正規化。allowedMimeTypes 只接受框架能做內容簽章比對的型別——
- * 若允許任意字串，開發者會以為加進清單就等於受到校驗，實際上只是比對了
- * 客戶端自己宣告的值。
+ * 上傳設定的正規化。
+ *
+ * allowedMimeTypes 只接受能做內容簽章比對的型別——若允許任意字串，開發者會
+ * 以為加進清單就等於受到校驗，實際上只是比對了客戶端自己宣告的值。這項檢查
+ * 需要 FileTypeService，而設定正規化早於 service 容器建立，因此 fileTypes
+ * 為選填：dispatcher 在註冊每條 route 時一定會帶入，仍然是啟動期就失敗。
  */
-export function normalizeUploadConfig(source, label = "API defaults config upload") {
+export function normalizeUploadConfig(
+  source,
+  label = "API defaults config upload",
+  fileTypes = null
+) {
   if (source === null || typeof source !== "object" || Array.isArray(source)) {
     throw new Error(`${label} must be an object`);
   }
@@ -47,12 +53,14 @@ export function normalizeUploadConfig(source, label = "API defaults config uploa
     throw new Error(`${label} "allowedMimeTypes" must be a non-empty array`);
   }
 
-  const unsupported = allowedMimeTypes.filter((type) => !isSupportedMimeType(type));
+  if (fileTypes) {
+    const unsupported = allowedMimeTypes.filter((type) => !fileTypes.has(type));
 
-  if (unsupported.length > 0) {
-    throw new Error(
-      `${label} "allowedMimeTypes" contains types the framework cannot verify by content: ${unsupported.join(", ")}. Supported: ${supportedMimeTypes().join(", ")}`
-    );
+    if (unsupported.length > 0) {
+      throw new Error(
+        `${label} "allowedMimeTypes" contains types that cannot be verified by content: ${unsupported.join(", ")}. Register them in FileTypeService.registerCustomTypes(). Currently registered: ${fileTypes.supported().join(", ")}`
+      );
+    }
   }
 
   const directory = String(source.directory || "").trim();

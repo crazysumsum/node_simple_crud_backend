@@ -56,7 +56,8 @@ const apiConfig = {
 
       // 允許的檔案型別。框架會同時比對「客戶端宣告的 MIME、副檔名、檔案實際
       // 內容的簽章」三者，任何一項不符即拒絕——只比對前兩者等於沒有校驗。
-      // 因此只接受框架能做內容比對的型別，清單見 framework/upload/fileSignatures.js。
+      // 因此只接受已在 FileTypeService 註冊的型別；要新增型別請在
+      // src/services/filetype/FileTypeService.js 的 registerCustomTypes() 內註冊。
       allowedMimeTypes: [
         "application/pdf",
         "image/png",

@@ -3,11 +3,7 @@ import { chmod, mkdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import busboy from "busboy";
 import { ApplicationError } from "../errors/ApplicationError.js";
-import {
-  extensionsFor,
-  rejectionReason,
-  SIGNATURE_SAMPLE_BYTES
-} from "./fileSignatures.js";
+import { SIGNATURE_SAMPLE_BYTES } from "./signatureMatchers.js";
 
 export class UploadError extends ApplicationError {
   constructor(code, message, statusCode = 400) {
@@ -20,8 +16,8 @@ export class UploadError extends ApplicationError {
  * 是合法的 multipart filename，直接採用等於把寫入位置交給呼叫方。原始檔名只
  * 保留在回傳的中介資料裡，由 handler 自行決定是否存進資料庫。
  */
-function storedFileName(mimeType) {
-  const extension = extensionsFor(mimeType)[0] || "";
+function storedFileName(mimeType, fileTypes) {
+  const extension = fileTypes.extensionsFor(mimeType)[0] || "";
   return `${randomUUID()}${extension}`;
 }
 
@@ -54,7 +50,11 @@ function collect(stream, limitBytes, onLimit) {
  * 落盤後再刪除，也避免部分寫入的檔案殘留。maxFileSizeBytes 因此同時是每個
  * 請求的記憶體上限，這也是它預設只有 10MB 的原因。
  */
-export function createUploadMiddleware({ config, logger }) {
+export function createUploadMiddleware({ config, logger, fileTypes }) {
+  if (!fileTypes || typeof fileTypes.rejectionReason !== "function") {
+    throw new TypeError("Upload middleware requires the filetypes service");
+  }
+
   return function uploadMiddleware(req, res, next) {
     const contentType = String(req.get("content-type") || "");
 
@@ -143,7 +143,7 @@ export function createUploadMiddleware({ config, logger }) {
               return;
             }
 
-            const reason = rejectionReason({
+            const reason = fileTypes.rejectionReason({
               mimeType: declared,
               fileName: filename,
               sample: buffer.subarray(0, SIGNATURE_SAMPLE_BYTES)
@@ -211,7 +211,7 @@ export function createUploadMiddleware({ config, logger }) {
 
           try {
             for (const file of files) {
-              const storedName = storedFileName(file.mimeType);
+              const storedName = storedFileName(file.mimeType, fileTypes);
               const filePath = path.join(config.directory, storedName);
 
               await writeFile(filePath, file.buffer, { mode: config.fileMode });

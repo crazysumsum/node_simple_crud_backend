@@ -395,17 +395,45 @@ Each entry in `req.files` carries `field`, `originalName`, `storedName`, `path`,
 
 **Type checking is by content, not by label.** A declared MIME type and a file
 extension are both attacker-controlled strings — naming a shell script `invoice.pdf`
-and declaring `application/pdf` takes no effort. The framework requires all three to
-agree: the declared type must be in the route allowlist, the extension must match that
-type, and the leading bytes must match its signature. `allowedMimeTypes` therefore
-only accepts types the framework can verify by content; anything else is a startup
-error rather than a silently unchecked allowlist entry. The supported set lives in
-`server/src/framework/upload/fileSignatures.js`.
+and declaring `application/pdf` takes no effort. All three must agree: the declared
+type must be in the route allowlist, the extension must match that type, and the
+leading bytes must match its signature. `allowedMimeTypes` only accepts registered
+types, so an unverifiable entry is a startup error rather than a silently unchecked
+allowlist entry.
 
-Two limits of that approach are worth knowing. OOXML formats (`.xlsx`, `.docx`,
-`.pptx`) are ZIP containers, so they are verified as ZIP plus an OOXML marker rather
-than distinguished from one another. Text formats (`text/csv`, `text/plain`) have no
-signature at all and are only checked for being decodable text without NUL bytes.
+### Adding A File Type
+
+Types live in the `filetypes` service at
+`server/src/services/filetype/FileTypeService.js`, discovered like any other service.
+Add project-specific types in `registerCustomTypes()`, which is reserved for
+application code and is not overwritten by framework changes:
+
+```js
+import { isOle2Container } from "../../framework/upload/signatureMatchers.js";
+
+registerCustomTypes() {
+  this.register("application/vnd.ms-excel", {
+    extensions: [".xls"],
+    matches: isOle2Container
+  });
+}
+```
+
+A type is a MIME type, its allowed extensions (the first becomes the stored
+extension), and `matches(buffer)`, which receives the first 4096 bytes and returns a
+boolean. `signatureMatchers.js` provides `startsWith`, `isZipContainer`, `isOoxml`,
+`isOle2Container` and `isProbablyText`. Registering over a built-in type requires an
+explicit `{ override: true }`, so loosening a check is never accidental. Built-in
+types are listed separately in `builtInFileTypes.js`.
+
+Two things to check before adding a type:
+
+- **Is the signature shared?** OLE2 (`D0 CF 11 E0`) covers `.xls`, `.doc`, `.ppt` and
+  `.msi` installers; a ZIP header covers `.zip` and every OOXML format. Allowing one
+  allows the whole class. Telling them apart means parsing the container.
+- **Is it plain text?** CSV, JSON, XML and SVG have no signature, so `isProbablyText`
+  can only rule out binary content — it will not catch CSV formula injection. SVG is
+  XML and can embed `<script>`, so serve it as an attachment, never inline.
 
 Other guarantees:
 

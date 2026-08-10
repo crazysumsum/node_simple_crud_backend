@@ -384,18 +384,174 @@ test("a handler cannot return a file without declaring download.enabled", async 
   assert.equal((await response.json()).error.code, "INTERNAL_SERVER_ERROR");
 });
 
-test("upload config rejects types the framework cannot verify by content", async () => {
+test("upload config rejects types the file type service does not know", async () => {
   const { normalizeUploadConfig } = await import(
     "../src/framework/upload/normalizeUploadConfig.js"
   );
+  const { FileTypeService } = await import(
+    "../src/services/filetype/FileTypeService.js"
+  );
+  const fileTypes = new FileTypeService({});
+  const config = {
+    enabled: true,
+    directory: "storage/uploads",
+    allowedMimeTypes: ["application/x-msdownload"]
+  };
 
   assert.throws(
-    () =>
-      normalizeUploadConfig({
-        enabled: true,
-        directory: "storage/uploads",
-        allowedMimeTypes: ["application/x-msdownload"]
-      }),
-    /cannot verify by content/
+    () => normalizeUploadConfig(config, "upload config", fileTypes),
+    /cannot be verified by content/
   );
+
+  // 開發者註冊後同一份設定就會通過，不必改動框架程式碼。
+  fileTypes.register("application/x-msdownload", {
+    extensions: [".exe"],
+    matches: (buffer) => buffer[0] === 0x4d && buffer[1] === 0x5a
+  });
+  assert.doesNotThrow(() => normalizeUploadConfig(config, "upload config", fileTypes));
+});
+
+test("file type service registers custom types and refuses silent overrides", async () => {
+  const { FileTypeService } = await import(
+    "../src/services/filetype/FileTypeService.js"
+  );
+  const { isOle2Container } = await import(
+    "../src/framework/upload/signatureMatchers.js"
+  );
+  const fileTypes = new FileTypeService({});
+
+  // 內建型別仍在。
+  assert.ok(fileTypes.has("application/pdf"));
+  assert.deepEqual(fileTypes.extensionsFor("application/pdf"), [".pdf"]);
+
+  fileTypes.register("application/vnd.ms-excel", {
+    extensions: [".xls"],
+    matches: isOle2Container
+  });
+
+  const ole2 = Buffer.concat([
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+    Buffer.alloc(16)
+  ]);
+  assert.equal(
+    fileTypes.rejectionReason({
+      mimeType: "application/vnd.ms-excel",
+      fileName: "ledger.xls",
+      sample: ole2
+    }),
+    null
+  );
+  // 副檔名與內容仍然分別校驗。
+  assert.match(
+    fileTypes.rejectionReason({
+      mimeType: "application/vnd.ms-excel",
+      fileName: "ledger.xlsx",
+      sample: ole2
+    }),
+    /extension does not match/
+  );
+  assert.match(
+    fileTypes.rejectionReason({
+      mimeType: "application/vnd.ms-excel",
+      fileName: "ledger.xls",
+      sample: Buffer.from("not an OLE2 file")
+    }),
+    /content does not match/
+  );
+
+  // 放寬內建型別的規則必須是明確的決定。
+  assert.throws(
+    () => fileTypes.register("application/pdf", { extensions: [".pdf"], matches: () => true }),
+    /already registered/
+  );
+  assert.doesNotThrow(() =>
+    fileTypes.register(
+      "application/pdf",
+      { extensions: [".pdf"], matches: () => true },
+      { override: true }
+    )
+  );
+
+  assert.throws(() => fileTypes.register("nonsense", { extensions: [".x"], matches: () => true }), /MIME type is invalid/);
+  assert.throws(() => fileTypes.register("a/b", { extensions: ["x"], matches: () => true }), /starting with a dot/);
+  assert.throws(() => fileTypes.register("a/b", { extensions: [".x"] }), /matches\(buffer\)/);
+});
+
+test("a custom type registered in the service is accepted end to end", async (t) => {
+  const uploadDirectory = await mkdtemp(path.join(os.tmpdir(), "erp-custom-type-"));
+  t.after(() => rm(uploadDirectory, { recursive: true, force: true }));
+
+  // OLE2 開頭的舊版 Excel，預設不在內建清單內。
+  const XLS = Buffer.concat([
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+    Buffer.alloc(32)
+  ]);
+
+  class LedgerHandler extends BaseRequestHandler {
+    static handlerName = "uploadLedger";
+    static api = {
+      method: "POST",
+      path: "/api/v1/ledgers",
+      description: "Accept a legacy Excel ledger.",
+      authType: "public",
+      authorizationPolicies: [{ name: "allowAll", options: {} }],
+      upload: {
+        enabled: true,
+        directory: uploadDirectory,
+        allowedMimeTypes: ["application/vnd.ms-excel"]
+      },
+      requestSchema: { body: { type: "object", additionalProperties: true } },
+      responseSchema: { 201: { type: "object", additionalProperties: true } }
+    };
+
+    async execute(req) {
+      return this.response({ stored: req.files[0].storedName }, { statusCode: 201 });
+    }
+  }
+
+  const { isOle2Container } = await import(
+    "../src/framework/upload/signatureMatchers.js"
+  );
+  const source = defaultConfigurationSource();
+  const application = await createApplication({
+    configurationSource: {
+      ...source,
+      application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 }
+    },
+    handlerRegistryOptions: {
+      moduleUrls: ["virtual:ledger"],
+      moduleLoader: async () => ({ LedgerHandler })
+    },
+    // registerCustomTypes() 的等效注入點，測試不必改動 service 原始碼。
+    serviceOptions: {
+      filetypes: {
+        types: {
+          "application/vnd.ms-excel": { extensions: [".xls"], matches: isOle2Container }
+        }
+      },
+      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+    },
+    logger: silentLogger,
+    requestLogger: (_req, _res, next) => next(),
+    forceExit: () => {
+      throw new Error("Custom type test must not force exit");
+    }
+  });
+  t.after(() => application.shutdown("test_cleanup"));
+
+  const { url } = await application.start();
+  const data = new FormData();
+  data.append("file", new Blob([XLS], { type: "application/vnd.ms-excel" }), "ledger.xls");
+  const response = await fetch(`${url}/api/v1/ledgers`, { method: "POST", body: data });
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.match(body.data.stored, /^[0-9a-f-]{36}\.xls$/);
+
+  // 同一條 route 仍然拒絕內容不符的檔案。
+  const bad = new FormData();
+  bad.append("file", new Blob([Buffer.from("plain text")], { type: "application/vnd.ms-excel" }), "ledger.xls");
+  const rejected = await fetch(`${url}/api/v1/ledgers`, { method: "POST", body: bad });
+  assert.equal(rejected.status, 415);
+  assert.equal((await rejected.json()).error.code, "UPLOAD_TYPE_MISMATCH");
 });
