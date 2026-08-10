@@ -19,6 +19,7 @@ import {
   validateApiConfig
 } from "../middleware/apiDispatcher.js";
 import { createErrorHandler } from "../middleware/errorHandler.js";
+import { sendError } from "../http/apiResponse.js";
 import { RequestLimiter } from "../middleware/requestLimiter.js";
 import {
   createCorsOptions,
@@ -534,6 +535,16 @@ export async function createApplication({
     app.use(cors(createCorsOptions(security)));
     app.use(express.json({ limit: security.jsonBodyLimit }));
     app.use(apiDispatcher);
+    // apiDispatcher 已處理 /api 下的所有請求，走到這裡的都是框架不認識的路徑。
+    // 若交給 Express 內建的 404，客戶端會收到 HTML，破壞統一 JSON 信封的契約。
+    app.use((_req, res) => {
+      sendError(res, {
+        statusCode: 404,
+        code: "NOT_FOUND",
+        message: "Not found",
+        time
+      });
+    });
     app.use(createErrorHandler({ logger: activeLogger, time }));
 
     void activeLogger.info(
@@ -563,6 +574,7 @@ export async function createApplication({
           "cors",
           "jsonParser",
           "apiDispatcher",
+          "notFound",
           "errorHandler"
         ],
         serviceNames: services.names(),

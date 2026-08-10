@@ -152,6 +152,23 @@ test("application factory builds a startable and stoppable API with injected res
   assert.equal(body.data.database, "connected");
   assert.equal(body.meta.requestId, "factory-request");
 
+  // 框架不認識的路徑仍必須使用統一 JSON 信封，而不是 Express 內建的 HTML 404。
+  for (const path of ["/", "/does-not-exist", "/apidocs"]) {
+    const missing = await fetch(`${url}${path}`);
+    const missingBody = await missing.json();
+
+    assert.equal(missing.status, 404, `unexpected status for ${path}`);
+    assert.match(missing.headers.get("content-type"), /application\/json/);
+    assert.equal(missingBody.success, false);
+    assert.equal(missingBody.error.code, "NOT_FOUND");
+    assert.ok(missingBody.meta.timestamp, `missing meta.timestamp for ${path}`);
+  }
+
+  // /api 之下的未註冊路徑仍由 dispatcher 回 401，不可洩露 API 是否存在。
+  const unregisteredApi = await fetch(`${url}/api/v1/not-registered`);
+  assert.equal(unregisteredApi.status, 401);
+  assert.equal((await unregisteredApi.json()).error.code, "Unauthorized Access");
+
   const result = await application.shutdown("test_complete");
   assert.equal(application.state, "stopped");
   assert.equal(result.exitCode, 0);
