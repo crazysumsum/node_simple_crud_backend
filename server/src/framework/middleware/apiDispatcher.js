@@ -21,6 +21,9 @@ import {
 } from "../versioning/apiLifecycle.js";
 
 const HTTP_METHODS = new Set(["delete", "get", "patch", "post", "put"]);
+// Express 5 移除了 :param? 與裸 * 兩種寫法。提早比對可換來清楚的設定錯誤訊息，
+// 而不是等 path-to-regexp 在註冊 route 時丟出難以對應到 handler 的例外。
+const LEGACY_PATH_SYNTAX = /:[A-Za-z0-9_]+\?|\*(?![A-Za-z_])/;
 
 export function validateApiConfig(
   routes,
@@ -47,6 +50,14 @@ export function validateApiConfig(
 
     if (typeof route.path !== "string" || !route.path.startsWith("/api/")) {
       throw new Error(`API path must start with /api/: ${route.path}`);
+    }
+
+    const removedPathSyntax = LEGACY_PATH_SYNTAX.exec(route.path)?.[0];
+
+    if (removedPathSyntax) {
+      throw new Error(
+        `API path uses route syntax removed in Express 5 ("${removedPathSyntax}") for ${routeKey}. Write optional segments as {/:name} and wildcards as *name.`
+      );
     }
 
     if (typeof route.description !== "string" || !route.description.trim()) {

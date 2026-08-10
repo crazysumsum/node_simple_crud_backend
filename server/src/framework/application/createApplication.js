@@ -506,6 +506,9 @@ export async function createApplication({
     const { security } = configuration;
 
     app.set("trust proxy", security.reverseProxy.trustProxy);
+    // Express 5 預設改用 Node 內建的 querystring，不再解析 filter[status]=open
+    // 這類巢狀語法。明確指定 extended，讓 query 結構不隨 Express 版本而改變。
+    app.set("query parser", "extended");
 
     if (security.hidePoweredBy) {
       app.disable("x-powered-by");

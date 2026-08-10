@@ -293,6 +293,13 @@ Authentication failures use the same HTTP 401 response as unconfigured APIs. Bot
 `error.code` and `error.message` are `Unauthorized Access`, so clients cannot infer
 whether an API exists or why authentication failed.
 
+`static api.path` uses Express 5 route syntax. Named parameters such as
+`/api/v1/orders/:id` are unchanged, but optional segments are written `{/:id}` and
+wildcards must be named, for example `*splat`. The removed `:id?` and bare `*` forms
+are rejected during startup validation with an explicit message. Query strings are
+parsed with the extended parser, so `?filter[status]=open` still arrives as a nested
+object and must be declared that way in `requestSchema.query`.
+
 ## Request Context
 
 `server/src/services/context/RequestContextService.js` stores request-scoped state in

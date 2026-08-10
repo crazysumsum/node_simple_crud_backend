@@ -10,7 +10,10 @@ import {
 } from "../src/framework/auth/authStrategyRegistry.js";
 import { issueAccessToken } from "../src/framework/auth/jwtService.js";
 import { RequestContextService } from "../src/services/context/RequestContextService.js";
-import { createApiDispatcher as createDispatcher } from "../src/framework/middleware/apiDispatcher.js";
+import {
+  createApiDispatcher as createDispatcher,
+  validateApiConfig
+} from "../src/framework/middleware/apiDispatcher.js";
 import { createErrorHandler } from "../src/framework/middleware/errorHandler.js";
 import {
   createTestTime,
@@ -668,6 +671,46 @@ test("idempotency replays successful responses and rejects key reuse with new in
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json()).error.code, "IDEMPOTENCY_CONFLICT");
   assert.equal(handlerCalls, 1);
+});
+
+test("API config rejects route syntax that Express 5 removed", () => {
+  const route = (path) => [
+    {
+      ...apiRouteDefaults,
+      method: "GET",
+      path,
+      description: "Route syntax check.",
+      authType: "public",
+      handler: "noop",
+      requestSchema: emptyRequestSchema,
+      responseSchema: anySuccessResponseSchema
+    }
+  ];
+  const validate = (path) =>
+    validateApiConfig(route(path), {}, defaultAuthStrategies, 1000);
+
+  for (const path of ["/api/v1/items/:id?", "/api/v1/files/*"]) {
+    assert.throws(
+      () => validate(path),
+      (error) => {
+        assert.match(error.message, /route syntax removed in Express 5/);
+        return true;
+      },
+      `expected ${path} to be rejected`
+    );
+  }
+
+  // 合法寫法必須通過路徑檢查，錯誤只應來自後續的 handler 查找。
+  for (const path of ["/api/v1/items/:id", "/api/v1/files/*splat"]) {
+    assert.throws(
+      () => validate(path),
+      (error) => {
+        assert.match(error.message, /Handler not found/);
+        return true;
+      },
+      `expected ${path} to pass the path check`
+    );
+  }
 });
 
 assert.ok(defaultAuthStrategies.has("public"));

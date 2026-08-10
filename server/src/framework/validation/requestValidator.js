@@ -78,10 +78,19 @@ export class RequestValidator {
       : [];
 
     return (req) => {
+      // Express 5 的 req.query 是每次存取都重新解析的 getter，而且不可寫入。
+      // 先把每個位置取出成快照再驗證，coerceTypes/useDefaults 的改寫才會保留下來，
+      // 同時避免污染原始 request 物件。req.input 是 handler 唯一的輸入來源。
+      const sources = {
+        params: req.params,
+        query: { ...req.query },
+        body: req.body ?? {},
+        headers: req.headers
+      };
       const details = [];
 
       for (const [location, validate] of validators) {
-        if (!validate(req[location])) {
+        if (!validate(sources[location])) {
           details.push(
             ...(validate.errors || []).map((error) =>
               validationDetail(location, error)
@@ -98,10 +107,10 @@ export class RequestValidator {
       }
 
       req.input = Object.freeze({
-        params: requestSchema.params ? req.params : {},
-        query: requestSchema.query ? req.query : {},
-        body: requestSchema.body ? req.body : null,
-        headers: requestSchema.headers ? req.headers : {}
+        params: requestSchema.params ? sources.params : {},
+        query: requestSchema.query ? sources.query : {},
+        body: requestSchema.body ? sources.body : null,
+        headers: requestSchema.headers ? sources.headers : {}
       });
     };
   }
