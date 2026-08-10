@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readdir, stat, unlink } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 // Shared JSONL file writer used by every configured Logger.
@@ -38,7 +38,55 @@ export class FileLogWriter {
     // 目前寫入中的檔案。快取路徑與大小，避免每一筆日誌都 readdir + stat 整個目錄
     // ——那個成本會隨保留天數累積的檔案數線性上升，而寫入是在請求路徑上。
     this.target = null;
-    this.ready = mkdir(config.directory, { recursive: true }).then(() => this.cleanup());
+    this.ready = mkdir(config.directory, {
+      recursive: true,
+      mode: config.directoryMode
+    })
+      .then(() => this.restrictExistingFiles())
+      .then(() => this.cleanup());
+  }
+
+  /**
+   * appendFile 的 mode 只在建檔時生效，mkdir 的 mode 也只套用在新建目錄上，
+   * 所以升級既有安裝時要主動收緊——舊檔案正是裝著個資的那些。
+   * 權限調整可能因檔案系統或擁有者不符而失敗，屬於盡力而為，不應讓應用啟動失敗。
+   */
+  async restrictExistingFiles() {
+    const { directory, filePrefix, fileMode, directoryMode } = this.config;
+
+    try {
+      await chmod(directory, directoryMode);
+    } catch (error) {
+      console.error(
+        `Failed to restrict log directory permissions on ${directory}: ${error.message}`
+      );
+      return;
+    }
+
+    let files;
+
+    try {
+      files = await readdir(directory);
+    } catch {
+      return;
+    }
+
+    await Promise.all(
+      files
+        .filter(
+          (fileName) =>
+            fileName.startsWith(`${filePrefix}-`) && fileName.endsWith(".log")
+        )
+        .map(async (fileName) => {
+          try {
+            await chmod(path.join(directory, fileName), fileMode);
+          } catch (error) {
+            console.error(
+              `Failed to restrict log file permissions on ${fileName}: ${error.message}`
+            );
+          }
+        })
+    );
   }
 
   write(entry) {
@@ -57,7 +105,11 @@ export class FileLogWriter {
       const contentSize = Buffer.byteLength(content, "utf8");
       const filePath = await this.filePathForWrite(date, contentSize);
 
-      await appendFile(filePath, content, "utf8");
+      // mode 只在這一次呼叫實際建立檔案時生效；既有檔案由 restrictExistingFiles 處理。
+      await appendFile(filePath, content, {
+        encoding: "utf8",
+        mode: this.config.fileMode
+      });
     });
 
     this.queue = task.catch(() => {});

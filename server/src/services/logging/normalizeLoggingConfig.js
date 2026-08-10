@@ -52,6 +52,26 @@ function errorStatusThreshold(value, fieldName) {
   return status;
 }
 
+/**
+ * 檔案權限位元。設定檔可寫 0o600 這類八進位字面值，或 "0600" 字串；
+ * 字串一律以八進位解讀，避免有人誤寫十進位 600（= 0o1130）。
+ */
+function permissionMode(value, fieldName, fallback) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  const mode = typeof value === "string" ? Number.parseInt(value, 8) : Number(value);
+
+  if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
+    throw new Error(
+      `Logging config "${fieldName}" must be a file mode between 0o000 and 0o777`
+    );
+  }
+
+  return mode;
+}
+
 export function normalizeLoggerConfig(source, name = "logger") {
   const profile = requirePlainObject(source, `logging.loggers.${name}`);
   const directory = path.isAbsolute(profile.directory)
@@ -96,6 +116,16 @@ export function normalizeLoggerConfig(source, name = "logger") {
     bodyCaptureErrorStatus: errorStatusThreshold(
       profile.bodyCaptureErrorStatus,
       `loggers.${name}.bodyCaptureErrorStatus`
+    ),
+    fileMode: permissionMode(
+      profile.fileMode,
+      `loggers.${name}.fileMode`,
+      0o600
+    ),
+    directoryMode: permissionMode(
+      profile.directoryMode,
+      `loggers.${name}.directoryMode`,
+      0o700
     ),
     redactedFields: Array.isArray(profile.redactedFields)
       ? Object.freeze(profile.redactedFields.map(String))

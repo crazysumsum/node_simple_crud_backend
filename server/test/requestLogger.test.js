@@ -403,6 +403,79 @@ test("file writer reuses its resolved target instead of rescanning per write", a
   assert.equal(content.trim().split("\n").length, 20);
 });
 
+test("file writer keeps log files and their directory owner-only", async (t) => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "erp-log-mode-"));
+  const directory = path.join(parent, "logs");
+  t.after(async () => {
+    const { rm } = await import("node:fs/promises");
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  const { mkdir, chmod, stat: statFile } = await import("node:fs/promises");
+  // 升級情境：目錄與檔案原本是全域可讀。
+  await mkdir(directory, { recursive: true, mode: 0o755 });
+  const legacyFile = path.join(directory, `requests-${time.fileDate()}.log`);
+  await writeFile(legacyFile, "{}\n", "utf8");
+  await chmod(legacyFile, 0o644);
+
+  const writer = new FileLogWriter({
+    config: { ...baseConfig, directory, fileMode: 0o600, directoryMode: 0o700 },
+    time
+  });
+  await writer.ready;
+
+  const mode = async (target) => (await statFile(target)).mode & 0o777;
+
+  // 既有檔案必須一併收緊——它們正是裝著已落盤資料的那些。
+  assert.equal(await mode(directory), 0o700);
+  assert.equal(await mode(legacyFile), 0o600);
+
+  // 之後新建的檔案（含輪替出來的）同樣必須是 0600。
+  const entry = {
+    timestamp: time.timestamp(),
+    level: "info",
+    event: "http.request.completed",
+    message: "HTTP request completed",
+    context: {}
+  };
+  await writer.write(entry);
+  writer.config = { ...writer.config, maxFileSizeBytes: 1 };
+  writer.target = null;
+  await writer.write(entry);
+
+  const files = await readdir(directory);
+  assert.ok(files.length >= 2, `expected a rotated file, got ${files.join(", ")}`);
+
+  for (const fileName of files) {
+    assert.equal(
+      await mode(path.join(directory, fileName)),
+      0o600,
+      `${fileName} must not be readable by other users`
+    );
+  }
+});
+
+test("logging config rejects an out-of-range file mode", async () => {
+  const { normalizeLoggerConfig } = await import(
+    "../src/services/logging/normalizeLoggingConfig.js"
+  );
+
+  // 字串以八進位解讀，避免誤寫十進位 600。
+  assert.equal(
+    normalizeLoggerConfig({ ...baseConfig, directory: "logs", fileMode: "640" }, "request")
+      .fileMode,
+    0o640
+  );
+  assert.throws(
+    () =>
+      normalizeLoggerConfig(
+        { ...baseConfig, directory: "logs", fileMode: 0o1777 },
+        "request"
+      ),
+    /fileMode/
+  );
+});
+
 test("file writer rotates logs before the size limit is exceeded", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "erp-rotating-logs-"));
   t.after(async () => {

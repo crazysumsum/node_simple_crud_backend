@@ -23,6 +23,13 @@ const loggingConfig = {
       // 每個日誌檔案最大容量，單位為 bytes；超過前會建立同日流水號檔案。
       maxFileSizeBytes: 10485760,
 
+      // 日誌檔與目錄的權限。預設只有擁有者可讀寫，因為日誌會保留 30 天，
+      // 且在錯誤或 route 明確 opt-in 時含有完整 request／response body。
+      // 若有以其他帳號執行的 log shipper 需要讀取，可放寬為 0o640 並同群組。
+      // 啟動時也會把既有的同前綴日誌檔一併收緊。
+      fileMode: 0o600,
+      directoryMode: 0o700,
+
       // 最低記錄級別，可使用 debug、info、warn 或 error。
       // Request middleware 產生 info 級別日誌，因此通常設定為 info。
       minimumLevel: "info",
@@ -73,6 +80,13 @@ const loggingConfig = {
 
       // 每個 system log 檔案最大容量，單位為 bytes。
       maxFileSizeBytes: 10485760,
+
+      // 日誌檔與目錄的權限。預設只有擁有者可讀寫，因為日誌會保留 30 天，
+      // 且在錯誤或 route 明確 opt-in 時含有完整 request／response body。
+      // 若有以其他帳號執行的 log shipper 需要讀取，可放寬為 0o640 並同群組。
+      // 啟動時也會把既有的同前綴日誌檔一併收緊。
+      fileMode: 0o600,
+      directoryMode: 0o700,
 
       // 最低記錄級別，可使用 debug、info、warn 或 error。
       // 例如設定為 warn 時，只會寫入 warn 及 error。

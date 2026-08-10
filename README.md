@@ -105,6 +105,10 @@ with an inline comment in that file. Common logger settings include:
 - `redactedFields`: field names that are replaced with `[REDACTED]`
 - `bodyCapture`: `none` (default) or `full`, for request and response bodies
 - `bodyCaptureErrorStatus`: status code at or above which bodies are always kept
+- `fileMode` / `directoryMode`: log file and directory permissions, `0o600` / `0o700`
+  by default. Startup also tightens existing files with the same prefix, so upgrading
+  fixes logs that were already written. Widen to `0o640` if a log shipper running as
+  another account in the same group needs to read them.
 
 ### Request And Response Bodies
 
