@@ -226,41 +226,58 @@ built-in default, so the application refuses to start without it. Generate one w
 After a successful login, handlers can call `issueAccessToken` from
 `server/src/framework/auth/jwtService.js`.
 
-Authentication strategy classes under `server/src/auth_strategies` are discovered
-recursively once by the Application Factory at startup. Each class extends
-`BaseAuthStrategy`, declares a unique `static authType`, and implements
-`authenticate(req)`. No registry, dispatcher, or factory changes are required.
-Duplicate or invalid auth types stop startup.
+An authentication strategy is an ordinary service. It lives anywhere under
+`server/src/services`, is found by the same discovery that loads every other service,
+and declares `static service` metadata alongside a unique `static authType`. The
+framework therefore has only two discovery mechanisms — handlers and services.
 
 ```js
-import { AuthenticationError } from "../framework/auth/AuthenticationError.js";
-import { BaseAuthStrategy } from "../framework/auth/BaseAuthStrategy.js";
+import { AuthenticationError } from "../../framework/auth/AuthenticationError.js";
+import { BaseAuthStrategy } from "../../framework/auth/BaseAuthStrategy.js";
 
 export class ApiKeyAuthStrategy extends BaseAuthStrategy {
   static authType = "apiKey";
 
+  static service = {
+    name: "auth.apiKey",
+    lifecycle: "singleton",
+    dependencies: ["logging", "mysqldatabase"],
+    eager: true
+  };
+
+  constructor(context) {
+    super(context);
+    this.database = context.services.require("mysqldatabase");
+  }
+
   async authenticate(req) {
-    if (req.get("x-api-key") !== process.env.INTEGRATION_API_KEY) {
+    const [rows] = await this.database.execute(
+      "SELECT client_id FROM api_keys WHERE token = ?",
+      [req.get("x-api-key")]
+    );
+
+    if (rows.length === 0) {
       throw new AuthenticationError("API_KEY_INVALID", "API key is invalid");
     }
 
-    return { type: this.authType, clientId: "integration-client" };
+    return { type: this.authType, clientId: rows[0].client_id };
   }
 
-  async close() {
+  async shutdown() {
     // Release strategy-owned clients, connections, timers, or subscriptions here.
   }
 }
 ```
 
-After adding the file, set `authType: "apiKey"` in the Handler's `static api`. Strategy
-instances receive a frozen services container through `this.services`, with
-`this.logger` and `this.jwtConfig` convenience properties. Application-specific
-strategy services may be supplied through the Factory's `authStrategyServices` option.
-`authenticate(req)` must return an object whose `type` matches `static authType`.
-The framework freezes that object and assigns it to `req.auth`; a returned `claims`
-property is also exposed as `req.user`. The optional `close()` lifecycle method runs
-once during graceful shutdown and during startup rollback.
+After adding the file, set `authType: "apiKey"` in the handler's `static api`. Because
+strategies are services they get the container's dependency injection, initialization
+ordering and shutdown for free: declare what you need in `dependencies`, read it with
+`context.services.require(...)`, and let the container close you. There is no separate
+strategy-services option and no separate strategy lifecycle.
+
+`authenticate(req)` must return an object whose `type` matches `static authType`. The
+framework freezes that object and assigns it to `req.auth`; a returned `claims`
+property is also exposed as `req.user`. Duplicate or invalid auth types stop startup.
 
 Authorization is a separate step after authentication. The default `authenticated`
 policy may be replaced through `static api.authorizationPolicies`; all configured

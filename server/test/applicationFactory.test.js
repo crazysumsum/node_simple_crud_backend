@@ -58,7 +58,7 @@ test("application factory validates configuration before creating the MySQL data
   assert.equal(poolFactoryCalls, 0);
 });
 
-test("application factory closes authentication strategies when setup fails", async () => {
+test("application factory shuts down container services when setup fails", async () => {
   const source = defaultConfigurationSource();
   const logger = memoryLogger();
   let closeCalls = 0;
@@ -101,7 +101,9 @@ test("application factory closes authentication strategies when setup fails", as
     })
   );
 
-  assert.equal(closeCalls, 1);
+  // 策略的生命週期由 service container 負責，注入進來的 registry 屬於呼叫方，
+  // 框架不再代為關閉——這裡確認的是容器持有的資源確實被釋放。
+  assert.equal(closeCalls, 0);
   assert.equal(poolFactoryCalls, 1);
   assert.equal(poolEndCalls, 1);
 });
@@ -173,7 +175,6 @@ test("application factory builds a startable and stoppable API with injected res
   assert.equal(application.state, "stopped");
   assert.equal(result.exitCode, 0);
   assert.equal(result.httpServerClosed, true);
-  assert.equal(result.authStrategiesClosed, true);
   assert.equal(result.servicesClosed, true);
   assert.equal(poolEndCalls, 1);
   assert.ok(
@@ -341,9 +342,16 @@ test("business handlers and auth strategies are auto-discovered from implementat
 
   class ApiKeyAuthStrategy extends BaseAuthStrategy {
     static authType = "apiKey";
+    // 策略就是 service：同一套 discovery、同一套依賴注入、同一套生命週期。
+    static service = {
+      name: "auth.apiKey",
+      lifecycle: "singleton",
+      dependencies: ["acceptedApiKey"],
+      eager: true
+    };
 
-    constructor(services) {
-      super(services);
+    constructor(context) {
+      super(context);
       strategyInstances += 1;
     }
 
@@ -358,7 +366,7 @@ test("business handlers and auth strategies are auto-discovered from implementat
       return { type: this.authType, clientId: "integration-test" };
     }
 
-    async close() {
+    async shutdown() {
       strategyCloseCalls += 1;
     }
   }
@@ -381,7 +389,8 @@ test("business handlers and auth strategies are auto-discovered from implementat
     serviceDiscoveryOptions: {
       additionalModuleUrls: [
         "virtual:exampleBusinessService",
-        "virtual:requestBusinessService"
+        "virtual:requestBusinessService",
+        "virtual:apiKeyAuthStrategy"
       ],
       moduleLoader: async (url) => {
         if (url === "virtual:exampleBusinessService") {
@@ -392,14 +401,14 @@ test("business handlers and auth strategies are auto-discovered from implementat
           return { RequestBusinessService };
         }
 
+        if (url === "virtual:apiKeyAuthStrategy") {
+          return { ApiKeyAuthStrategy };
+        }
+
         return import(url);
       }
     },
-    authStrategyRegistryOptions: {
-      moduleUrls: ["virtual:apiKeyAuthStrategy"],
-      moduleLoader: async () => ({ ApiKeyAuthStrategy })
-    },
-    authStrategyServices: { acceptedApiKey: "test-api-key" },
+    serviceValues: { acceptedApiKey: "test-api-key" },
     logger,
     requestLogger: testRequestLogger(),
     serviceOptions: { mysqldatabase: { pool } },
@@ -451,7 +460,8 @@ test("business handlers and auth strategies are auto-discovered from implementat
     )
   );
   const shutdown = await application.shutdown("test_complete");
-  assert.equal(shutdown.authStrategiesClosed, true);
+  // 策略隨容器一起關閉，因此計入 servicesClosed 而非獨立欄位。
+  assert.equal(shutdown.servicesClosed, true);
   assert.equal(strategyCloseCalls, 1);
   assert.equal(businessServiceShutdowns, 1);
   assert.equal(requestServiceInstances, 2);

@@ -104,31 +104,6 @@ function closeIdempotencyManager(manager, timeoutMs) {
   });
 }
 
-function closeAuthStrategies(strategies, timeoutMs) {
-  if (!strategies?.close) {
-    return Promise.resolve(true);
-  }
-
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (closedGracefully) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      clearTimeout(timeout);
-      resolve(closedGracefully);
-    };
-    const timeout = setTimeout(() => finish(false), timeoutMs);
-
-    Promise.resolve().then(() => strategies.close()).then(
-      () => finish(true),
-      () => finish(false)
-    );
-  });
-}
-
 class Application {
   constructor({
     app,
@@ -247,10 +222,6 @@ class Application {
       this.idempotencyManager,
       remainingTime()
     );
-    const authStrategiesClosed = await closeAuthStrategies(
-      this.authStrategies,
-      remainingTime()
-    );
     const serviceShutdown = await this.services.shutdown({
       exclude: ["logging"],
       timeoutMs: remainingTime()
@@ -268,7 +239,6 @@ class Application {
         httpServerClosed,
         rateLimitStoreClosed,
         idempotencyStoreClosed,
-        authStrategiesClosed,
         servicesClosed: serviceShutdown.closed,
         serviceFailures: serviceShutdown.failures.map(({ name }) => name)
       }
@@ -286,7 +256,6 @@ class Application {
       !httpServerClosed ||
       !rateLimitStoreClosed ||
       !idempotencyStoreClosed ||
-      !authStrategiesClosed ||
       !serviceShutdown.closed ||
       !loggingShutdown.closed
         ? 1
@@ -300,7 +269,6 @@ class Application {
       httpServerClosed,
       rateLimitStoreClosed,
       idempotencyStoreClosed,
-      authStrategiesClosed,
       servicesClosed: serviceShutdown.closed && loggingShutdown.closed
     });
   }
@@ -338,8 +306,6 @@ export async function createApplication({
   handlerServices,
   handlerRegistryOptions,
   strategies,
-  authStrategyServices,
-  authStrategyRegistryOptions,
   authorizationPolicies,
   validator,
   responseValidator,
@@ -362,8 +328,7 @@ export async function createApplication({
   });
   const customValues = mergeServiceValues(
     handlerServices,
-    authStrategyServices,
-    serviceValues
+      serviceValues
   );
   const values = {
     jwtConfig: configuration.jwt,
@@ -459,12 +424,11 @@ export async function createApplication({
         logger: activeLogger,
         context
       });
+    // 策略是一般的 service，已經由 container 建立完成；這裡只是依 authType
+    // 建立索引，不再掃描目錄，也不接管它們的生命週期。
     activeStrategies =
       activeStrategies ||
-      (await createAuthStrategyRegistry({
-        ...authStrategyRegistryOptions,
-        services
-      }));
+      createAuthStrategyRegistry({ services, logger: activeLogger });
     const activeAuthorizationPolicies =
       authorizationPolicies || createAuthorizationPolicyRegistry();
     const activeHandlers =
@@ -603,10 +567,6 @@ export async function createApplication({
       forceExit
     });
   } catch (error) {
-    await closeAuthStrategies(
-      activeStrategies,
-      configuration.application.shutdownTimeoutMs
-    );
     await services.shutdown({
       timeoutMs: configuration.application.shutdownTimeoutMs
     });

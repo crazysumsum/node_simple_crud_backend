@@ -2,18 +2,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthenticationError } from "../src/framework/auth/AuthenticationError.js";
 import { BaseAuthStrategy } from "../src/framework/auth/BaseAuthStrategy.js";
-import {
-  createAuthStrategyRegistry
-} from "../src/framework/auth/authStrategyRegistry.js";
-import { createAuthStrategyServices } from "../src/framework/auth/createAuthStrategyServices.js";
+import { createAuthStrategyRegistry } from "../src/framework/auth/authStrategyRegistry.js";
+import { ServiceContainer } from "../src/framework/services/ServiceContainer.js";
 
-const silentLogger = {
-  info: async () => {}
-};
+const silentLogger = { info: async () => {} };
 
-test("auth strategy discovery registers implementations and injects services", async () => {
+/**
+ * 策略現在是一般 service，所以測試也用真正的 container 建立它們——
+ * 這樣才會連帶驗證依賴注入與生命週期都走同一條路。
+ */
+async function containerWith(strategyClasses, values = {}) {
+  const container = new ServiceContainer({
+    definitions: strategyClasses.map((ServiceClass) => ({
+      name: ServiceClass.service.name,
+      lifecycle: ServiceClass.service.lifecycle,
+      dependencies: Object.freeze([...ServiceClass.service.dependencies]),
+      eager: true,
+      ServiceClass,
+      moduleUrl: `virtual:${ServiceClass.name}`
+    })),
+    values
+  });
+  await container.initialize();
+  return container;
+}
+
+function strategyService(name, dependencies = []) {
+  return Object.freeze({ name, lifecycle: "singleton", dependencies, eager: true });
+}
+
+test("auth strategies are collected from the service container", async () => {
   class ApiKeyAuthStrategy extends BaseAuthStrategy {
     static authType = "apiKey";
+    static service = strategyService("auth.apiKey", ["expectedKey"]);
 
     async authenticate(req) {
       if (req.get("x-api-key") !== this.services.require("expectedKey")) {
@@ -24,18 +45,9 @@ test("auth strategy discovery registers implementations and injects services", a
     }
   }
 
-  const services = createAuthStrategyServices({
-    logger: silentLogger,
-    custom: { expectedKey: "secret" }
-  });
-  const registry = await createAuthStrategyRegistry({
-    services,
-    moduleUrls: ["virtual:apiKeyAuthStrategy"],
-    moduleLoader: async () => ({ ApiKeyAuthStrategy })
-  });
-  const request = {
-    get: (name) => (name === "x-api-key" ? "secret" : undefined)
-  };
+  const services = await containerWith([ApiKeyAuthStrategy], { expectedKey: "secret" });
+  const registry = createAuthStrategyRegistry({ services, logger: silentLogger });
+  const request = { get: (name) => (name === "x-api-key" ? "secret" : undefined) };
 
   assert.deepEqual(registry.types(), ["apiKey"]);
   assert.deepEqual(await registry.authenticate("apiKey", request), {
@@ -44,53 +56,87 @@ test("auth strategy discovery registers implementations and injects services", a
   });
   assert.equal(request.auth.type, "apiKey");
   assert.deepEqual(request.user, { sub: "api-client" });
-  assert.equal(typeof services.require, "function");
   assert.equal(Object.isFrozen(request.auth), true);
 });
 
-test("auth strategy discovery rejects duplicate auth types", async () => {
-  let closeCalls = 0;
+test("the registry ignores container entries that are not strategies", async () => {
+  class ApiKeyAuthStrategy extends BaseAuthStrategy {
+    static authType = "apiKey";
+    static service = strategyService("auth.apiKey");
 
+    async authenticate() {
+      return { type: this.authType };
+    }
+  }
+
+  class PlainService {
+    static service = strategyService("plain");
+  }
+
+  const services = await containerWith([ApiKeyAuthStrategy, PlainService], {
+    someValue: 42
+  });
+  const registry = createAuthStrategyRegistry({ services, logger: silentLogger });
+
+  assert.deepEqual(registry.types(), ["apiKey"]);
+});
+
+test("the registry rejects duplicate auth types", async () => {
   class FirstStrategy extends BaseAuthStrategy {
     static authType = "duplicate";
+    static service = strategyService("auth.first");
 
-    async close() {
-      closeCalls += 1;
+    async authenticate() {
+      return { type: this.authType };
     }
   }
   class SecondStrategy extends BaseAuthStrategy {
     static authType = "duplicate";
+    static service = strategyService("auth.second");
 
-    async close() {
-      closeCalls += 1;
+    async authenticate() {
+      return { type: this.authType };
     }
   }
 
-  await assert.rejects(
-    () =>
-      createAuthStrategyRegistry({
-        moduleUrls: ["virtual:first", "virtual:second"],
-        moduleLoader: async (url) =>
-          url === "virtual:first" ? { FirstStrategy } : { SecondStrategy }
-      }),
+  const services = await containerWith([FirstStrategy, SecondStrategy]);
+
+  assert.throws(
+    () => createAuthStrategyRegistry({ services, logger: silentLogger }),
     /Duplicate authentication strategy/
   );
-  assert.equal(closeCalls, 2);
 });
 
-test("auth strategy registry validates the returned auth contract", async () => {
+test("the registry rejects an invalid static authType", async () => {
+  class BrokenStrategy extends BaseAuthStrategy {
+    static authType = "not a valid type";
+    static service = strategyService("auth.broken");
+
+    async authenticate() {
+      return { type: this.authType };
+    }
+  }
+
+  const services = await containerWith([BrokenStrategy]);
+
+  assert.throws(
+    () => createAuthStrategyRegistry({ services, logger: silentLogger }),
+    /invalid static authType/
+  );
+});
+
+test("the registry validates the returned auth contract", async () => {
   class InvalidStrategy extends BaseAuthStrategy {
     static authType = "invalid";
+    static service = strategyService("auth.invalid");
 
     async authenticate() {
       return { type: "anotherType" };
     }
   }
 
-  const registry = await createAuthStrategyRegistry({
-    moduleUrls: ["virtual:invalid"],
-    moduleLoader: async () => ({ InvalidStrategy })
-  });
+  const services = await containerWith([InvalidStrategy]);
+  const registry = createAuthStrategyRegistry({ services, logger: silentLogger });
 
   await assert.rejects(
     () => registry.authenticate("invalid", {}),
@@ -98,26 +144,40 @@ test("auth strategy registry validates the returned auth contract", async () => 
   );
 });
 
-test("auth strategy registry closes every strategy only once", async () => {
+test("strategy shutdown is driven by the container, not the registry", async () => {
   let closeCalls = 0;
 
   class StatefulStrategy extends BaseAuthStrategy {
     static authType = "stateful";
+    static service = strategyService("auth.stateful");
 
-    async close() {
+    async authenticate() {
+      return { type: this.authType };
+    }
+
+    async shutdown() {
       closeCalls += 1;
     }
   }
 
-  const registry = await createAuthStrategyRegistry({
-    moduleUrls: ["virtual:stateful"],
-    moduleLoader: async () => ({ StatefulStrategy })
-  });
+  const services = await containerWith([StatefulStrategy]);
+  const registry = createAuthStrategyRegistry({ services, logger: silentLogger });
 
-  await Promise.all([registry.close(), registry.close()]);
+  assert.deepEqual(registry.types(), ["stateful"]);
+  // registry 不再擁有生命週期，容器關閉時策略才會被關閉，且只關一次。
+  assert.equal(typeof registry.close, "undefined");
+  await services.shutdown();
+  await services.shutdown();
   assert.equal(closeCalls, 1);
+});
+
+test("a strategy must declare a static authType", async () => {
+  class NamelessStrategy extends BaseAuthStrategy {
+    static service = strategyService("auth.nameless");
+  }
+
   await assert.rejects(
-    () => registry.authenticate("stateful", {}),
-    /registry is closed/
+    () => containerWith([NamelessStrategy]),
+    /must declare a non-empty static authType/
   );
 });
