@@ -346,6 +346,165 @@ are rejected during startup validation with an explicit message. Query strings a
 parsed with the extended parser, so `?filter[status]=open` still arrives as a nested
 object and must be declared that way in `requestSchema.query`.
 
+## File Uploads And Downloads
+
+Both are off by default and enabled per route in `static api`. Defaults live under
+`defaults.upload` and `defaults.download` in `server/config/api.js`; a handler
+overrides only the fields it needs.
+
+### Uploads
+
+```js
+static api = {
+  method: "POST",
+  path: "/api/v1/documents",
+  description: "Attach a scanned invoice.",
+  upload: {
+    enabled: true,
+    maxFileSizeBytes: 5242880,
+    maxFiles: 3,
+    allowedMimeTypes: ["application/pdf"]
+  },
+  requestSchema: {
+    body: {
+      type: "object",
+      required: ["invoiceId"],
+      additionalProperties: false,
+      properties: { invoiceId: { type: "string" } }
+    }
+  },
+  responseSchema: { 201: { /* ... */ } }
+};
+
+async execute(req) {
+  // Text fields arrive in req.input.body and are schema-validated as usual.
+  // Files arrive in req.files, already validated and written to disk.
+  for (const file of req.files) {
+    await this.mysqlDatabase.execute(
+      "INSERT INTO documents (invoice_id, stored_name, original_name, mime_type, size) VALUES (?, ?, ?, ?, ?)",
+      [req.input.body.invoiceId, file.storedName, file.originalName, file.mimeType, file.size]
+    );
+  }
+
+  return this.response({ stored: req.files.length }, { statusCode: 201 });
+}
+```
+
+Each entry in `req.files` carries `field`, `originalName`, `storedName`, `path`,
+`mimeType` and `size`.
+
+**Type checking is by content, not by label.** A declared MIME type and a file
+extension are both attacker-controlled strings — naming a shell script `invoice.pdf`
+and declaring `application/pdf` takes no effort. All three must agree: the declared
+type must be in the route allowlist, the extension must match that type, and the
+leading bytes must match its signature. `allowedMimeTypes` only accepts registered
+types, so an unverifiable entry is a startup error rather than a silently unchecked
+allowlist entry.
+
+### Adding A File Type
+
+Types live in the `filetypes` service at
+`server/src/services/filetype/FileTypeService.js`, discovered like any other service.
+Add project-specific types in `registerCustomTypes()`, which is reserved for
+application code and is not overwritten by framework changes:
+
+```js
+import { isOle2Container } from "../../framework/upload/signatureMatchers.js";
+
+registerCustomTypes() {
+  this.register("application/vnd.ms-excel", {
+    extensions: [".xls"],
+    matches: isOle2Container
+  });
+}
+```
+
+A type is a MIME type, its allowed extensions (the first becomes the stored
+extension), and `matches(buffer)`, which receives the first 4096 bytes and returns a
+boolean. `signatureMatchers.js` provides `startsWith`, `isZipContainer`, `isOoxml`,
+`isOle2Container` and `isProbablyText`. Registering over a built-in type requires an
+explicit `{ override: true }`, so loosening a check is never accidental. Built-in
+types are listed separately in `builtInFileTypes.js`.
+
+`matches` receives the **complete** file, not a prefix: the upload middleware buffers
+it before validating, and formats like OLE2 keep their identifying data near the end.
+
+Two things to check before adding a type:
+
+- **Is the signature shared?** A ZIP header covers `.zip` and every OOXML format;
+  OLE2 (`D0 CF 11 E0`) covers `.xls`, `.doc`, `.ppt` and `.msi` installers. Allowing
+  the container allows the whole class. The built-in OLE2 types therefore use
+  `isOle2WithStream()` to also require an Office stream name, which is what keeps a
+  renamed `.msi` out; do the same for custom types that share a container.
+- **Is it plain text?** CSV, JSON, XML and SVG have no signature, so `isProbablyText`
+  can only rule out binary content — it will not catch CSV formula injection. SVG is
+  XML and can embed `<script>`, so serve it as an attachment, never inline.
+
+### Built-In Types
+
+| Group | Types | Verification |
+| --- | --- | --- |
+| Documents | `.pdf` | unique signature |
+| Images | `.png` `.jpg`/`.jpeg` `.gif` `.webp` | unique signature |
+| Office 2007+ | `.xlsx` `.docx` `.pptx` | ZIP + OOXML marker — **not distinguishable from each other** |
+| Office 2003− | `.xls` `.doc` `.ppt` | OLE2 + Office stream name — distinguishable, and excludes `.msi` |
+| Archives | `.zip` `.7z` `.rar` `.gz`/`.tgz` `.tar` `.bz2` `.xz` | container signature only |
+| Text | `.csv` `.txt` | no signature; binary content ruled out |
+
+Archives are verified as containers, not by their contents. Allowing an archive allows
+whatever is inside it, so handle zip bombs and traversal in entry names when you
+extract. Extension matching uses the last segment only, so `backup.tar.gz` is checked
+against `.gz`.
+
+Registration is not the same as permission: a route only accepts what its
+`allowedMimeTypes` lists, which defaults to PDF, PNG, JPEG and `.xlsx` in
+`config/api.js`.
+
+Other guarantees:
+
+- The client filename is never used on disk. Stored names are a generated UUID plus
+  the extension for the verified type, so `../../.ssh/authorized_keys` is inert. The
+  original name is passed to the handler as metadata for you to store if you want it.
+- Size limits abort mid-stream; an oversized upload is never fully buffered or
+  written. Files are held in memory until validation passes, so `maxFileSizeBytes` is
+  also the per-request memory ceiling.
+- Parsing runs **after** authentication and authorization, so anonymous traffic cannot
+  make the server parse uploads.
+- A partially written batch is cleaned up rather than left behind.
+- Files are written `0600` into a `0700` directory, configurable per route.
+- Rejected uploads are never stored.
+
+### Downloads
+
+```js
+static api = {
+  method: "GET",
+  path: "/api/v1/reports/:id",
+  download: { enabled: true },
+  ...
+};
+
+async execute(req) {
+  const filePath = resolveWithinDirectory(uploadDirectory, req.input.params.id);
+  return this.file({ path: filePath, fileName: "季度報表.pdf", contentType: "application/pdf" });
+}
+```
+
+`this.file()` takes exactly one of `path`, `buffer` or `stream`, so stored files,
+in-memory content and generated exports all work. The framework sets `Content-Type`,
+`Content-Disposition` (with an RFC 5987 `filename*` so non-ASCII names survive),
+`Content-Length` where known, and `Cache-Control: private, no-store`.
+
+Calling `this.file()` on a route that has not declared `download.enabled` is a 500,
+not a silent bypass — the JSON envelope stays the default and opting out is explicit.
+
+Whenever a path is derived from request input, pass it through
+`resolveWithinDirectory` from `server/src/framework/http/fileResponse.js`. It resolves
+against the allowed root and rejects anything that escapes it.
+
+Request logging skips file bodies automatically in both directions; see
+[Request And Response Bodies](#request-and-response-bodies).
+
 ## Request Context
 
 `server/src/services/context/RequestContextService.js` stores request-scoped state in

@@ -34,6 +34,48 @@ const apiConfig = {
       bodyCapture: "none"
     },
 
+    // 檔案上傳。預設關閉，需要的 API 必須在 Handler 的 static api.upload 明確啟用。
+    // 所有欄位都可在 Handler 內個別覆蓋。
+    upload: {
+      // 是否接受 multipart/form-data。啟用後該 route 不再解析 JSON body，
+      // 表單的文字欄位會放進 req.body，檔案放進 req.files。
+      enabled: false,
+
+      // 檔案落盤目錄。相對路徑以 server 目錄為基準，不存在時自動建立。
+      directory: "storage/uploads",
+
+      // 單一檔案大小上限（bytes）。校驗在串流階段進行，超限即中止，
+      // 不會把超出的內容收進記憶體或寫入磁碟。
+      maxFileSizeBytes: 10485760,
+
+      // 單一請求最多接受的檔案數。
+      maxFiles: 1,
+
+      // 表單文字欄位數量上限。
+      maxFieldCount: 20,
+
+      // 允許的檔案型別。框架會同時比對「客戶端宣告的 MIME、副檔名、檔案實際
+      // 內容的簽章」三者，任何一項不符即拒絕——只比對前兩者等於沒有校驗。
+      // 因此只接受已在 FileTypeService 註冊的型別；要新增型別請在
+      // src/services/filetype/FileTypeService.js 的 registerCustomTypes() 內註冊。
+      allowedMimeTypes: [
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ],
+
+      // 落盤檔案與目錄的權限，預設只有擁有者可存取。
+      fileMode: 0o600,
+      directoryMode: 0o700
+    },
+
+    // 檔案下載。啟用後該 route 的 handler 可以回傳 this.file(...)，
+    // 回應不套用統一 JSON 信封，也不執行 responseSchema 驗證。
+    download: {
+      enabled: false
+    },
+
     // null 表示沿用 application.js 的全域 requestTimeoutMs。
     timeoutMs: null
   },
