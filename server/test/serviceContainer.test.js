@@ -145,6 +145,17 @@ test("service discovery finds the built-in public services", async () => {
 
   assert.deepEqual(summary, [
     {
+      // 認證策略也是一般 service，因此出現在這份清單裡。
+      name: "auth.jwt",
+      lifecycle: "singleton",
+      dependencies: ["jwtConfig", "verifyToken", "logging"]
+    },
+    {
+      name: "auth.public",
+      lifecycle: "singleton",
+      dependencies: []
+    },
+    {
       name: "context",
       lifecycle: "singleton",
       dependencies: ["time"]

@@ -8,7 +8,12 @@ import {
   AuthStrategyRegistry,
   createAuthStrategyRegistry
 } from "../src/framework/auth/authStrategyRegistry.js";
-import { issueAccessToken } from "../src/framework/auth/jwtService.js";
+import {
+  issueAccessToken,
+  validateJwtConfig,
+  verifyAccessToken
+} from "../src/framework/auth/jwtService.js";
+import { createServiceContainer } from "../src/framework/services/createServiceContainer.js";
 import { RequestContextService } from "../src/services/context/RequestContextService.js";
 import {
   createApiDispatcher as createDispatcher,
@@ -30,7 +35,25 @@ const emptyRequestSchema = {};
 const anySuccessResponseSchema = { 200: {} };
 const time = createTestTime();
 const requestContext = new RequestContextService({ services: servicesWithTime(time) });
-const defaultAuthStrategies = await createAuthStrategyRegistry();
+// 策略現在是一般 service，所以測試也經由真實的 container 取得它們——
+// 這條路徑與 Application Factory 完全相同。
+const strategyContainer = await createServiceContainer({
+  config: {},
+  values: {
+    jwtConfig: validateJwtConfig(),
+    verifyToken: (token) => verifyAccessToken(token),
+    // 策略宣告依賴 logging 以固定初始化順序，測試提供同形狀的替身。
+    logging: { logger: silentLogger }
+  },
+  discoveryOptions: {
+    servicesDirectory: new URL("../src/services/auth/", import.meta.url)
+  },
+  options: {}
+});
+const defaultAuthStrategies = createAuthStrategyRegistry({
+  services: strategyContainer,
+  logger: silentLogger
+});
 const apiRouteDefaults = {
   version: "v1",
   deprecation: {

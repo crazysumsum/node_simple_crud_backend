@@ -1,62 +1,16 @@
-import { readdir } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { AuthenticationError } from "./AuthenticationError.js";
 import { BaseAuthStrategy } from "./BaseAuthStrategy.js";
-import { createAuthStrategyServices } from "./createAuthStrategyServices.js";
 import { systemLoggerFromServices } from "../services/serviceAccess.js";
 
-const DEFAULT_STRATEGIES_DIRECTORY = new URL(
-  "../../auth_strategies/",
-  import.meta.url
-);
 const AUTH_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9._-]*$/;
 
-async function findStrategyModules(directory) {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const modules = [];
-
-  for (const entry of entries) {
-    const entryPath = path.join(directory, entry.name);
-
-    if (entry.isDirectory()) {
-      modules.push(...(await findStrategyModules(entryPath)));
-      continue;
-    }
-
-    if (
-      entry.isFile() &&
-      entry.name.endsWith(".js") &&
-      !entry.name.endsWith(".test.js") &&
-      !entry.name.startsWith("_")
-    ) {
-      modules.push(pathToFileURL(entryPath).href);
-    }
-  }
-
-  return modules.sort();
-}
-
-function exportedStrategyClasses(moduleNamespace) {
-  return [...new Set(Object.values(moduleNamespace))].filter(
-    (value) =>
-      typeof value === "function" &&
-      value !== BaseAuthStrategy &&
-      value.prototype instanceof BaseAuthStrategy
-  );
-}
-
 export class AuthStrategyRegistry {
+  // 策略的建立與關閉都由 service container 負責，這裡只做索引與呼叫。
   constructor() {
     this.strategies = new Map();
-    this.closePromise = null;
   }
 
   register(type, strategy) {
-    if (this.closePromise) {
-      throw new Error("Authentication strategy registry is closed");
-    }
-
     if (typeof type !== "string" || !AUTH_TYPE_PATTERN.test(type)) {
       throw new TypeError("Authentication type is invalid");
     }
@@ -89,10 +43,6 @@ export class AuthStrategyRegistry {
   }
 
   async authenticate(type, req) {
-    if (this.closePromise) {
-      throw new Error("Authentication strategy registry is closed");
-    }
-
     const entry = this.strategies.get(type);
 
     if (!entry) {
@@ -123,95 +73,59 @@ export class AuthStrategyRegistry {
     return auth;
   }
 
-  close() {
-    if (this.closePromise) {
-      return this.closePromise;
-    }
-
-    const strategies = [...this.strategies.values()]
-      .map(({ strategy }) => strategy)
-      .filter((strategy) => typeof strategy?.close === "function")
-      .reverse();
-
-    this.closePromise = Promise.all(
-      strategies.map((strategy) =>
-        Promise.resolve().then(() => strategy.close())
-      )
-    ).then(() => undefined);
-    return this.closePromise;
-  }
 }
 
-export async function createAuthStrategyRegistry({
-  services = createAuthStrategyServices(),
-  strategiesDirectory = DEFAULT_STRATEGIES_DIRECTORY,
-  moduleUrls,
-  moduleLoader = (url) => import(url)
-} = {}) {
-  if (services === null || typeof services !== "object" || Array.isArray(services)) {
-    throw new TypeError("Authentication strategy registry services must be an object");
+/**
+ * 從 service container 收集認證策略。
+ *
+ * 策略是一般的 service，由 service discovery 載入、由 container 建立與關閉，
+ * 所以這裡不需要掃目錄，也不負責生命週期——只是把已存在的 instance 依 authType
+ * 建立索引，供 dispatcher 查找。
+ */
+export function createAuthStrategyRegistry({ services, logger } = {}) {
+  if (!services || typeof services.names !== "function") {
+    throw new TypeError("Authentication strategy registry requires a service container");
   }
 
-  const directory =
-    strategiesDirectory instanceof URL
-      ? fileURLToPath(strategiesDirectory)
-      : path.resolve(String(strategiesDirectory));
-  const urls = moduleUrls || (await findStrategyModules(directory));
-  const modules = await Promise.all(urls.map((url) => moduleLoader(url)));
   const registry = new AuthStrategyRegistry();
-  const logger = systemLoggerFromServices(services);
-  let unregisteredStrategy = null;
+  const activeLogger = logger || systemLoggerFromServices(services);
 
-  try {
-    for (const [moduleIndex, moduleNamespace] of modules.entries()) {
-      for (const StrategyClass of exportedStrategyClasses(moduleNamespace)) {
-        if (
-          typeof StrategyClass.authType !== "string" ||
-          !AUTH_TYPE_PATTERN.test(StrategyClass.authType)
-        ) {
-          throw new Error(
-            `${StrategyClass.name} in ${urls[moduleIndex]} has an invalid static authType`
-          );
-        }
+  for (const name of services.names()) {
+    const instance = services.get(name);
 
-        unregisteredStrategy = new StrategyClass(services);
-
-        if (unregisteredStrategy.authType !== StrategyClass.authType) {
-          throw new Error(
-            `${StrategyClass.name} instance authType must match its static authType`
-          );
-        }
-
-        registry.register(unregisteredStrategy.authType, unregisteredStrategy);
-        unregisteredStrategy = null;
-        void logger?.info?.(
-          "auth.strategy.registered",
-          "Authentication strategy registered",
-          {
-            authType: StrategyClass.authType,
-            className: StrategyClass.name,
-            module: urls[moduleIndex]
-          }
-        );
-      }
+    if (!(instance instanceof BaseAuthStrategy)) {
+      continue;
     }
 
-    void logger?.info?.(
-      "auth.strategy.registration.completed",
-      "Authentication strategy discovery completed",
-      { strategyCount: registry.types().length, authTypes: registry.types() }
-    );
+    const authType = instance.constructor.authType;
 
-    return registry;
-  } catch (error) {
-    await Promise.allSettled([
-      registry.close(),
-      ...(typeof unregisteredStrategy?.close === "function"
-        ? [Promise.resolve().then(() => unregisteredStrategy.close())]
-        : [])
-    ]);
-    throw error;
+    if (typeof authType !== "string" || !AUTH_TYPE_PATTERN.test(authType)) {
+      throw new Error(
+        `${instance.constructor.name} (service "${name}") has an invalid static authType`
+      );
+    }
+
+    if (instance.authType !== authType) {
+      throw new Error(
+        `${instance.constructor.name} instance authType must match its static authType`
+      );
+    }
+
+    registry.register(authType, instance);
+    void activeLogger?.info?.(
+      "auth.strategy.registered",
+      "Authentication strategy registered",
+      { authType, className: instance.constructor.name, service: name }
+    );
   }
+
+  void activeLogger?.info?.(
+    "auth.strategy.registration.completed",
+    "Authentication strategy collection completed",
+    { strategyCount: registry.types().length, authTypes: registry.types() }
+  );
+
+  return registry;
 }
 
 export { AuthenticationError };
