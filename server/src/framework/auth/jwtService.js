@@ -3,10 +3,7 @@ import jwtConfig from "../../../config/jwt.js";
 import { normalizeJwtConfig } from "../configuration/normalizeJwtConfig.js";
 
 function activeJwtConfig(source = jwtConfig) {
-  return normalizeJwtConfig(source, {
-    environment: process.env.NODE_ENV || "development",
-    environmentSecret: process.env.JWT_SECRET
-  });
+  return normalizeJwtConfig(source);
 }
 
 export function validateJwtConfig(config = jwtConfig) {

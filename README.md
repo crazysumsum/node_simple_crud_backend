@@ -176,7 +176,9 @@ registered Handler definition return a generic HTTP 401 `Unauthorized Access`
 response.
 
 The built-in authentication types are `public` and `jwt`. JWT settings are stored in
-`server/config/jwt.js`; production secrets must be supplied through `JWT_SECRET`.
+`server/config/jwt.js`. `JWT_SECRET` is required in every environment and has no
+built-in default, so the application refuses to start without it. Generate one with
+`openssl rand -base64 48`.
 After a successful login, handlers can call `issueAccessToken` from
 `server/src/framework/auth/jwtService.js`.
 
@@ -534,7 +536,7 @@ All seven global configuration sections are normalized and validated together be
 runtime resources are created: application, API, database, JWT, logging, security,
 and the unified request lifecycle configuration. Invalid startup configuration throws
 `ConfigurationError` with a `details` array containing every invalid section.
-Production startup also requires `JWT_SECRET` from the environment.
+Startup in every environment also requires `JWT_SECRET`.
 
 ## MySQL Database Service
 

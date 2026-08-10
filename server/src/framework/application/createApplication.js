@@ -333,7 +333,6 @@ function mergeServiceValues(...sources) {
 export async function createApplication({
   configurationSource = defaultConfigurationSource(),
   environment = process.env.NODE_ENV || "development",
-  environmentSecret = process.env.JWT_SECRET,
   routes,
   handlers,
   handlerServices,
@@ -359,8 +358,7 @@ export async function createApplication({
   forceExit = (code) => process.exit(code)
 } = {}) {
   const configuration = validateApplicationConfiguration(configurationSource, {
-    environment,
-    environmentSecret
+    environment
   });
   const customValues = mergeServiceValues(
     handlerServices,
