@@ -1,4 +1,5 @@
 const AUTH_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9._-]*$/;
+const BODY_CAPTURE_MODES = ["none", "full"];
 
 function plainObject(value, label) {
   if (
@@ -60,6 +61,7 @@ export function normalizeApiDefaultsConfig(source, { defaultVersion } = {}) {
   );
   const deprecation = cloneData(source.deprecation, "API defaults deprecation");
   const idempotency = cloneData(source.idempotency, "API defaults idempotency");
+  const logging = cloneData(source.logging, "API defaults logging");
   const timeoutMs = source.timeoutMs;
 
   if (!/^v[1-9]\d*$/.test(version)) {
@@ -78,6 +80,7 @@ export function normalizeApiDefaultsConfig(source, { defaultVersion } = {}) {
 
   plainObject(deprecation, "API defaults deprecation");
   plainObject(idempotency, "API defaults idempotency");
+  plainObject(logging, "API defaults logging");
 
   if (typeof deprecation.deprecated !== "boolean") {
     throw new Error('API defaults config "deprecation.deprecated" must be boolean');
@@ -85,6 +88,12 @@ export function normalizeApiDefaultsConfig(source, { defaultVersion } = {}) {
 
   if (typeof idempotency.enabled !== "boolean") {
     throw new Error('API defaults config "idempotency.enabled" must be boolean');
+  }
+
+  if (!BODY_CAPTURE_MODES.includes(logging.bodyCapture)) {
+    throw new Error(
+      `API defaults config "logging.bodyCapture" must be one of: ${BODY_CAPTURE_MODES.join(", ")}`
+    );
   }
 
   if (
@@ -100,6 +109,7 @@ export function normalizeApiDefaultsConfig(source, { defaultVersion } = {}) {
     authorizationPolicies,
     deprecation,
     idempotency,
+    logging,
     timeoutMs: timeoutMs === null ? null : Number(timeoutMs)
   });
 }
