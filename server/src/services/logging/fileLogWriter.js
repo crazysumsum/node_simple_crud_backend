@@ -35,6 +35,9 @@ export class FileLogWriter {
 
     this.lastCleanupAt = 0;
     this.queue = Promise.resolve();
+    // 目前寫入中的檔案。快取路徑與大小，避免每一筆日誌都 readdir + stat 整個目錄
+    // ——那個成本會隨保留天數累積的檔案數線性上升，而寫入是在請求路徑上。
+    this.target = null;
     this.ready = mkdir(config.directory, { recursive: true }).then(() => this.cleanup());
   }
 
@@ -67,43 +70,59 @@ export class FileLogWriter {
   }
 
   async filePathForWrite(date, contentSize) {
+    // 只有在第一次寫入、跨日，或清理過後才需要回到磁碟重新對齊。
+    if (!this.target || this.target.date !== date) {
+      this.target = await this.resolveTarget(date);
+    }
+
+    if (
+      this.target.size > 0 &&
+      this.target.size + contentSize > this.config.maxFileSizeBytes
+    ) {
+      const index = this.target.index + 1;
+      this.target = {
+        date,
+        index,
+        filePath: path.join(
+          this.config.directory,
+          rotatedFileName(`${this.config.filePrefix}-${date}`, index)
+        ),
+        size: 0
+      };
+    }
+
+    this.target.size += contentSize;
+    return this.target.filePath;
+  }
+
+  async resolveTarget(date) {
     const baseName = `${this.config.filePrefix}-${date}`;
     const files = await readdir(this.config.directory);
-    let latestIndex = 0;
+    let index = 0;
 
     for (const fileName of files) {
-      const index = rotationIndex(fileName, baseName);
+      const fileIndex = rotationIndex(fileName, baseName);
 
-      if (index !== null && index > latestIndex) {
-        latestIndex = index;
+      if (fileIndex !== null && fileIndex > index) {
+        index = fileIndex;
       }
     }
 
-    let filePath = path.join(
+    const filePath = path.join(
       this.config.directory,
-      rotatedFileName(baseName, latestIndex)
+      rotatedFileName(baseName, index)
     );
-    let currentSize = 0;
+    let size = 0;
 
     try {
-      currentSize = (await stat(filePath)).size;
+      size = (await stat(filePath)).size;
     } catch (error) {
       if (error.code !== "ENOENT") {
         throw error;
       }
     }
 
-    if (
-      currentSize > 0 &&
-      currentSize + contentSize > this.config.maxFileSizeBytes
-    ) {
-      filePath = path.join(
-        this.config.directory,
-        rotatedFileName(baseName, latestIndex + 1)
-      );
-    }
-
-    return filePath;
+    return { date, index, filePath, size };
   }
 
   async cleanupIfDue() {
@@ -132,6 +151,8 @@ export class FileLogWriter {
         })
     );
 
+    // cleanup 可能刪掉目前寫入中的檔案，快取的大小便不再可信。
+    this.target = null;
     this.lastCleanupAt = this.time.nowMs();
   }
 }

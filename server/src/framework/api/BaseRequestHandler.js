@@ -109,7 +109,10 @@ export class BaseRequestHandler {
       null;
     let handlerError;
 
-    await this.logger?.info?.(
+    // 日誌落盤不應擋在請求路徑上。框架其他地方（dispatcher、限流、生命週期）
+    // 都用 void 送出，這裡先前的 await 會讓每個請求多等兩次檔案寫入。
+    this.writeLog(
+      "info",
       "request.handler.started",
       `Request handler started: ${this.handlerName}`,
       {
@@ -197,19 +200,36 @@ export class BaseRequestHandler {
           stack: handlerError.stack
         };
 
-        await this.logger?.error?.(
+        this.writeLog(
+          "error",
           "request.handler.finished",
           `Request handler failed: ${this.handlerName}`,
           context
         );
       } else {
-        await this.logger?.info?.(
+        this.writeLog(
+          "info",
           "request.handler.finished",
           `Request handler completed: ${this.handlerName}`,
           context
         );
       }
     }
+  }
+
+  // 送出日誌但不等待落盤。寫入失敗只記在 console，不可讓原本成功的請求失敗。
+  writeLog(level, event, message, context) {
+    const write = this.logger?.[level];
+
+    if (typeof write !== "function") {
+      return;
+    }
+
+    Promise.resolve(write.call(this.logger, event, message, context)).catch(
+      (error) => {
+        console.error(`Failed to record handler event: ${error.message}`);
+      }
+    );
   }
 
   async execute(_req, _res, _next) {
