@@ -695,6 +695,106 @@ normally accesses application services as follows:
 const user = this.services.require("user");
 ```
 
+## Background Jobs
+
+Recurring work is declared with `static jobs` on the service that provides it, next to
+`static service`. There is no third discovery mechanism, and the scheduler does not
+scan anything: a service that wants scheduling declares `scheduler` as a dependency
+and submits its own jobs.
+
+```js
+export class ReportService extends BaseService {
+  static service = {
+    name: "report",
+    lifecycle: "singleton",
+    dependencies: ["scheduler", "mysqldatabase", "logging"],
+    eager: true
+  };
+
+  static jobs = [
+    { name: "report.refreshCache", method: "refreshCache", intervalMs: 60000 },
+    { name: "report.monthly", method: "sendMonthly", intervalMs: 3600000, scope: "cluster" }
+  ];
+
+  async initialize() {
+    this.services.require("scheduler").register(this);
+  }
+
+  async refreshCache(signal) { /* ... */ }
+  async sendMonthly(signal) { /* ... */ }
+}
+```
+
+Pushing rather than being collected keeps the Application Factory out of it entirely.
+It also makes the dependency real: because `scheduler` is declared, the container
+guarantees it exists before `initialize()` runs, so there is no collection-timing
+problem, and the scheduling relationship shows up in the dependency graph instead of
+being an invisible edge. Disabling the scheduler with `static service.enabled` then
+does the obvious thing — the application still starts, and any service that declared
+it as a dependency fails loudly instead of silently losing its jobs.
+
+The cost of pushing is that `static jobs` without a `register()` call schedules
+nothing. `scheduler.started` lists everything registered, which is where to look when
+a job does not run.
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Unique across all services; duplicates stop startup |
+| `method` | Method on the same service. Checked at startup, so a typo fails immediately rather than silently doing nothing hours later |
+| `intervalMs` | Delay between runs |
+| `timeoutMs` | Optional; defaults to `scheduler.defaultTimeoutMs`. A ceiling, not an expected duration |
+| `scope` | `"instance"` (default) or `"cluster"` |
+| `runOnStart` | Run once immediately instead of waiting out the first interval |
+
+Every job receives an `AbortSignal`. Honour it for anything long-running: it fires on
+timeout and on shutdown.
+
+### Instance And Cluster Scope
+
+An `instance` job runs on **every** instance. That is what you want for refreshing a
+local cache, and wrong for anything with an external effect.
+
+A `cluster` job takes a lease in the `job_leases` table before each run, so exactly one
+instance runs it per tick. Instances that do not get the lease skip the tick silently —
+that is normal operation, not a failure.
+
+Cluster jobs are **at-least-once, not exactly-once**. If the holder crashes mid-run the
+lease expires and another instance picks the job up on a later tick, with no knowledge
+of how far the first attempt got. Write cluster jobs so re-running them is safe.
+
+Which instance wins is not balanced or rotated; whichever asks first tends to keep
+winning while it stays healthy.
+
+### Failure Handling
+
+- A job that throws is logged as `scheduler.job.failed` and **keeps its schedule**.
+  Consecutive failures are counted so a job broken for days is visible rather than
+  merely absent.
+- A run still in progress when the next tick arrives causes that tick to be **skipped**,
+  never stacked. Skips are counted and logged.
+- Exceeding `timeoutMs` aborts the signal and logs the run as failed. The next tick
+  still happens.
+- Timers are `unref`'d, so background work never keeps the process alive.
+
+### Shutdown
+
+The scheduler is a source of work, like the HTTP server, so it is stopped in the same
+phase — before the stores and services it uses are torn down. Leaving it to the
+container's reverse-dependency shutdown would stop it *last*, firing jobs at an
+already-closed connection pool.
+
+### Configuration
+
+`server/config/scheduler.js` holds global defaults and per-job overrides by name, so
+frequency can be tuned or a job switched off per deployment without touching code.
+Only `enabled`, `intervalMs` and `timeoutMs` may be overridden; an unknown field stops
+startup rather than being silently ignored.
+
+Note the distinction from `static service.enabled`: that decides whether a service is
+loaded at all, while a job's `enabled` keeps the service and skips only the scheduled
+work. Setting `scheduler.enabled` to `false` disables all jobs, and the startup log
+still lists what was skipped.
+
 ## API Versioning And Deprecation
 
 Path-based versions are configured in `server/config/api.js` under `versioning`. Every route

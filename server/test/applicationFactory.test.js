@@ -249,6 +249,47 @@ test("responses that short-circuit the request still carry CORS headers", async 
   assert.ok(limited.headers.get("retry-after"));
 });
 
+test("the application starts even when the scheduler service is disabled", async (t) => {
+  const source = defaultConfigurationSource();
+  const logger = memoryLogger();
+  // 排程器停用之後容器裡就沒有它。Application Factory 若硬性 require 它，一個
+  // 只是不想跑背景工作的部署會完全無法啟動。
+  const application = await createApplication({
+    configurationSource: {
+      ...source,
+      application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 }
+    },
+    logger,
+    requestLogger: testRequestLogger(),
+    serviceDiscoveryOptions: {
+      moduleUrls: [
+        new URL("../src/services/logging/LoggingService.js", import.meta.url).href,
+        new URL("../src/services/time/SystemTimeService.js", import.meta.url).href,
+        new URL("../src/services/context/RequestContextService.js", import.meta.url).href,
+        new URL("../src/services/filetype/FileTypeService.js", import.meta.url).href,
+        new URL("../src/services/auth/JwtService.js", import.meta.url).href,
+        new URL("../src/services/auth/jwtAuthStrategy.js", import.meta.url).href,
+        new URL("../src/services/auth/publicAuthStrategy.js", import.meta.url).href,
+        new URL("../src/services/mysqldatabase/MySqlDatabaseService.js", import.meta.url).href
+      ]
+    },
+    serviceOptions: {
+      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+    }
+  });
+  t.after(() => application.shutdown("test_cleanup"));
+
+  const { url } = await application.start();
+  const response = await fetch(`${url}/api/v1/health`);
+
+  assert.equal(response.status, 200);
+  assert.equal(application.scheduler, null);
+
+  const result = await application.shutdown("test_complete");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.schedulerDrained, true);
+});
+
 test("business handlers and auth strategies are auto-discovered from implementations", async (t) => {
   let strategyInstances = 0;
   let strategyCloseCalls = 0;
