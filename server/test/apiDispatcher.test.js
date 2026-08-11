@@ -632,6 +632,49 @@ test("versioned deprecated APIs publish lifecycle headers", async (t) => {
   );
 });
 
+test("registering idempotency on an unauthenticated route is surfaced at startup", () => {
+  const entries = [];
+  const logger = {
+    ...silentLogger,
+    warn: async (event, message, context) => entries.push({ event, message, context })
+  };
+  const route = {
+    ...apiRouteDefaults,
+    method: "POST",
+    path: "/api/v1/public-orders",
+    description: "Create an order without authentication.",
+    authType: "public",
+    idempotency: { enabled: true, ttlMs: 60000 },
+    requestSchema: {},
+    responseSchema: anySuccessResponseSchema,
+    handler: "noop"
+  };
+  const handlers = { noop: new TestHandler("noop", function noop() { return this.response({}); }) };
+
+  createApiDispatcher({ routes: [route], handlers, logger });
+
+  // 未認證請求的 idempotency scope 只能靠 client IP 區分，而 IP 在代理後方
+  // 未必可信。這個組合沒有錯，但它對部署設定的依賴應該在上線前就看得見。
+  const entry = entries.find(
+    (candidate) => candidate.event === "api.public_idempotency_registered"
+  );
+  assert.ok(entry, "公開 route 啟用 idempotency 必須在啟動時被指出");
+  assert.deepEqual(entry.context.apis, ["POST /api/v1/public-orders"]);
+  assert.match(entry.context.resolution, /TRUST_PROXY/);
+
+  // 需要認證的 route 不受影響：scope 來自 JWT claims，與 IP 無關。
+  entries.length = 0;
+  createApiDispatcher({
+    routes: [{ ...route, authType: "jwt" }],
+    handlers,
+    logger
+  });
+  assert.equal(
+    entries.some((candidate) => candidate.event === "api.public_idempotency_registered"),
+    false
+  );
+});
+
 test("idempotency replays successful responses and rejects key reuse with new input", async (t) => {
   let handlerCalls = 0;
   const dispatcher = createApiDispatcher({

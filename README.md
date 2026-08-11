@@ -797,6 +797,31 @@ The proxy must replace, rather than append untrusted values to,
 when HTTPS enforcement relies on forwarded headers. Keep `TRUST_PROXY=false` and
 `ENFORCE_HTTPS=false` for direct local HTTP development.
 
+### Getting TRUST_PROXY Wrong
+
+Running behind a proxy without setting `TRUST_PROXY` used to be completely silent,
+and it is the kind of thing that is only noticed much later. `req.ip` becomes the
+proxy's own address, so every caller collapses onto one value:
+
+- **Rate limiting stops being per-client.** `maxRequestsPerIpPerWindow` becomes a
+  quota for the entire user base. One user behaving normally can lock everyone else
+  out — no attacker required. This is the worst of the three.
+- **`clientIp` is identical in every log line**, so there is nothing to trace with.
+- **Unauthenticated idempotency scope collapses.** Callers share one key namespace:
+  the same key with different input collides into `409 IDEMPOTENCY_CONFLICT`, and
+  with byte-identical input the second caller replays the first one's response.
+
+The application now reports this. The first request carrying `X-Forwarded-For` or
+`Forwarded` while `trustProxy` is disabled logs `security.proxy_headers_untrusted`
+once, with both readings spelled out — either the deployment needs `TRUST_PROXY`, or
+the application is directly exposed and a client is spoofing the header, which should
+be stripped at the edge. It logs once rather than per request.
+
+Registering idempotency on an `authType: "public"` route also logs
+`api.public_idempotency_registered` at startup, listing the routes. That combination
+is legitimate; the warning exists because its correctness depends on `req.ip`
+identifying the caller, which is a deployment property rather than a code one.
+
 ## Verification
 
 `npm run verify` runs the same three gates as CI, in the same order:
