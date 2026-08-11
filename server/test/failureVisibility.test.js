@@ -51,13 +51,13 @@ test("a rejected JWT records why it failed without telling the client", async ()
     config: {},
     services: {
       require: (name) => {
-        if (name === "jwtConfig") {
-          return { headerName: "authorization", authScheme: "Bearer" };
-        }
-
-        if (name === "verifyToken") {
-          return () => {
-            throw expired;
+        if (name === "jwt") {
+          return {
+            headerName: "authorization",
+            authScheme: "Bearer",
+            verify: () => {
+              throw expired;
+            }
           };
         }
 
