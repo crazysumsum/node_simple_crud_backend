@@ -14,7 +14,7 @@ import { normalizeApplicationConfig } from "./normalizeApplicationConfig.js";
 import { normalizeDatabaseConfig } from "./normalizeDatabaseConfig.js";
 import { normalizeJwtConfig } from "./normalizeJwtConfig.js";
 import { normalizeRequestConfig } from "./normalizeRequestConfig.js";
-import { normalizeSchedulerConfig } from "./normalizeSchedulerConfig.js";
+import { normalizeSchedulerConfig } from "../../services/scheduler/normalizeSchedulerConfig.js";
 
 export function defaultConfigurationSource() {
   return {

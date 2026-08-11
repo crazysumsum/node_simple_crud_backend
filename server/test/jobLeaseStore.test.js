@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   JobLeaseStore,
   MySqlJobLeaseStore
-} from "../src/framework/scheduler/JobLeaseStore.js";
+} from "../src/services/scheduler/JobLeaseStore.js";
 
 // 這是 cluster 工作唯一的互斥機制：它出錯的後果是同一輪在多個實例上重複執行。
 // 假資料庫只實作這個 store 真正用到的那幾句 SQL，讓判斷邏輯確實被執行到。

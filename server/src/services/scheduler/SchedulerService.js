@@ -1,7 +1,7 @@
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
-import { normalizeJobDefinition } from "../../framework/scheduler/normalizeJobDefinition.js";
-import { MySqlJobLeaseStore } from "../../framework/scheduler/JobLeaseStore.js";
+import { normalizeJobDefinition } from "./normalizeJobDefinition.js";
+import { MySqlJobLeaseStore } from "./JobLeaseStore.js";
 import { BaseService } from "../../framework/services/BaseService.js";
 
 /**

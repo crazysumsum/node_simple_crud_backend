@@ -1,4 +1,4 @@
-import { JOB_NAME_PATTERN } from "../configuration/normalizeSchedulerConfig.js";
+import { JOB_NAME_PATTERN } from "./normalizeSchedulerConfig.js";
 
 export const JOB_SCOPES = Object.freeze(["instance", "cluster"]);
 

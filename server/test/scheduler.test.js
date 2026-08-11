@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeSchedulerConfig } from "../src/framework/configuration/normalizeSchedulerConfig.js";
+import { normalizeSchedulerConfig } from "../src/services/scheduler/normalizeSchedulerConfig.js";
 import { SchedulerService } from "../src/services/scheduler/SchedulerService.js";
 
 // 排程器的測試全部用注入的假計時器驅動，沒有一個 sleep。這個工作階段已經被
