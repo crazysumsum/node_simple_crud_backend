@@ -1,0 +1,316 @@
+import { hostname } from "node:os";
+import { randomUUID } from "node:crypto";
+import { normalizeJobDefinition } from "../../framework/scheduler/normalizeJobDefinition.js";
+import { MySqlJobLeaseStore } from "../../framework/scheduler/JobLeaseStore.js";
+import { BaseService } from "../../framework/services/BaseService.js";
+
+/**
+ * 背景定時作業。
+ *
+ * 工作宣告在提供它的 service 的 static jobs 上，由 Application Factory 在容器
+ * 初始化完成後呼叫 collectFrom() 收集——service 在自己的 initialize() 裡看不到
+ * 排在它後面才建立的 service，所以收集必須晚於整個容器。這與
+ * createAuthStrategyRegistry 走訪容器的做法相同。
+ *
+ * 排程器是「工作來源」而不是「葉子資源」：它必須在它所使用的 service 被拆掉
+ * 之前先停下來，所以 Factory 會在關閉 HTTP server 的同一階段呼叫 stop()。容器
+ * 之後還會再呼叫一次 shutdown()，兩者都是冪等的。
+ */
+export class SchedulerService extends BaseService {
+  static service = Object.freeze({
+    name: "scheduler",
+    lifecycle: "singleton",
+    dependencies: ["logging", "time", "mysqldatabase"],
+    eager: true
+  });
+
+  constructor({ config, services, options = {} } = {}) {
+    super({ config, services, options });
+    this.schedulerConfig = config.scheduler;
+    this.logger = services.require("logging").logger;
+    this.time = services.require("time");
+    this.database = services.require("mysqldatabase");
+
+    // 計時器可注入，測試才能確定性地推進時間而不用 sleep。
+    this.setTimer = options.setTimer || ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = options.clearTimer || ((handle) => clearTimeout(handle));
+    this.random = options.random || Math.random;
+    this.leaseStore =
+      options.leaseStore || new MySqlJobLeaseStore({ database: this.database });
+    // 租約的持有者識別。UUID 保證唯一，主機名與 pid 是給人看的。
+    this.owner = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
+
+    this.jobs = new Map();
+    this.timers = new Map();
+    this.running = new Map();
+    this.stats = new Map();
+    this.started = false;
+    this.stopped = false;
+  }
+
+  /** 走訪容器，收集每個 service 上宣告的 static jobs。 */
+  collectFrom(services) {
+    if (this.started) {
+      throw new Error("Scheduler jobs must be collected before start()");
+    }
+
+    for (const { name } of services.describe()) {
+      const instance = services.get(name);
+      const declared = instance?.constructor?.jobs;
+
+      if (!declared) {
+        continue;
+      }
+
+      if (!Array.isArray(declared)) {
+        throw new Error(`Service "${name}" static jobs must be an array`);
+      }
+
+      for (const source of declared) {
+        const job = normalizeJobDefinition(source, instance, name, this.schedulerConfig);
+
+        if (this.jobs.has(job.name)) {
+          throw new Error(
+            `Duplicate job name "${job.name}" declared by services "${this.jobs.get(job.name).serviceName}" and "${name}"`
+          );
+        }
+
+        this.jobs.set(job.name, job);
+        this.stats.set(job.name, {
+          runs: 0,
+          failures: 0,
+          skippedOverlapping: 0,
+          skippedNotLeader: 0,
+          timeouts: 0,
+          consecutiveFailures: 0
+        });
+      }
+    }
+
+    return this;
+  }
+
+  describeJobs() {
+    return [...this.jobs.values()].map(
+      ({ name, serviceName, method, scope, intervalMs, timeoutMs, enabled, runOnStart }) =>
+        Object.freeze({
+          name,
+          service: serviceName,
+          method,
+          scope,
+          intervalMs,
+          timeoutMs,
+          enabled: enabled && this.schedulerConfig.enabled,
+          runOnStart
+        })
+    );
+  }
+
+  async start() {
+    if (this.started || this.stopped) {
+      return this;
+    }
+
+    this.started = true;
+    const active = [...this.jobs.values()].filter((job) => job.enabled);
+
+    if (!this.schedulerConfig.enabled) {
+      // 整個排程器被關掉時，工作清單仍要記錄下來——「背景工作為什麼沒跑」
+      // 不該是一個要翻原始碼才能回答的問題。
+      await this.logger.info("scheduler.disabled", "Scheduler is disabled; no jobs scheduled", {
+        jobs: this.describeJobs()
+      });
+      return this;
+    }
+
+    const clusterJobs = active.filter((job) => job.scope === "cluster");
+
+    if (clusterJobs.length > 0) {
+      await this.leaseStore.prepare(clusterJobs.map((job) => job.name));
+    }
+
+    for (const job of active) {
+      this.schedule(job, this.initialDelayFor(job));
+    }
+
+    await this.logger.info("scheduler.started", "Background jobs scheduled", {
+      owner: this.owner,
+      jobCount: active.length,
+      jobs: this.describeJobs()
+    });
+    return this;
+  }
+
+  /**
+   * 首次執行加隨機延遲：多實例同時啟動時，所有實例會在同一毫秒一起打資料庫。
+   * runOnStart 的工作跳過抖動，因為那代表「現在就要跑一次」。
+   */
+  initialDelayFor(job) {
+    if (job.runOnStart) {
+      return 0;
+    }
+
+    const jitter = job.intervalMs * this.schedulerConfig.startupJitterRatio;
+    return Math.floor(job.intervalMs - jitter + this.random() * jitter);
+  }
+
+  schedule(job, delayMs) {
+    if (this.stopped) {
+      return;
+    }
+
+    const timer = this.setTimer(() => {
+      // 先排下一輪再執行：這一輪就算拋錯或逾時，排程也不會斷掉。
+      this.schedule(job, job.intervalMs);
+      void this.execute(job);
+    }, delayMs);
+
+    // 背景工作不該讓程序無法結束。
+    timer?.unref?.();
+    this.timers.set(job.name, timer);
+  }
+
+  async execute(job) {
+    const stats = this.stats.get(job.name);
+
+    // 上一輪還沒跑完就跳過這一輪。不這樣做的話，一個變慢的工作會堆積成無限並行。
+    if (this.running.has(job.name)) {
+      stats.skippedOverlapping += 1;
+      void this.logger.warn("scheduler.job.overlapping", "Skipped a job run still in progress", {
+        job: job.name,
+        skippedOverlapping: stats.skippedOverlapping
+      });
+      return;
+    }
+
+    let leaseHeld = false;
+
+    if (job.scope === "cluster") {
+      try {
+        leaseHeld = await this.leaseStore.acquire(job.name, {
+          owner: this.owner,
+          leaseMs: job.timeoutMs + this.schedulerConfig.clusterLeaseGraceMs
+        });
+      } catch (error) {
+        stats.failures += 1;
+        stats.consecutiveFailures += 1;
+        void this.logger.error("scheduler.lease.failed", "Could not acquire a cluster job lease", {
+          job: job.name,
+          owner: this.owner,
+          error: { name: error.name, message: error.message }
+        });
+        return;
+      }
+
+      if (!leaseHeld) {
+        // 另一個實例拿到了這一輪。這是正常運作，不是問題。
+        stats.skippedNotLeader += 1;
+        void this.logger.debug?.("scheduler.job.not_leader", "Another instance holds this job lease", {
+          job: job.name
+        });
+        return;
+      }
+    }
+
+    const controller = new AbortController();
+    const startedAt = this.time.nowMs();
+    const timeout = this.setTimer(() => {
+      controller.abort(new Error(`Job "${job.name}" exceeded ${job.timeoutMs}ms`));
+    }, job.timeoutMs);
+    timeout?.unref?.();
+
+    const settled = (async () => {
+      try {
+        await job.run(controller.signal);
+        stats.runs += 1;
+        stats.consecutiveFailures = 0;
+        void this.logger.debug?.("scheduler.job.completed", "Background job completed", {
+          job: job.name,
+          durationMs: this.time.nowMs() - startedAt
+        });
+      } catch (error) {
+        stats.failures += 1;
+        stats.consecutiveFailures += 1;
+
+        if (controller.signal.aborted) {
+          stats.timeouts += 1;
+        }
+
+        // 工作拋錯絕不能變成 unhandled rejection，也絕不能中斷排程。但連續
+        // 失敗必須看得見，否則「壞了三天沒人發現」是可能的。
+        void this.logger.error("scheduler.job.failed", "Background job failed", {
+          job: job.name,
+          durationMs: this.time.nowMs() - startedAt,
+          timedOut: controller.signal.aborted,
+          consecutiveFailures: stats.consecutiveFailures,
+          error: { name: error.name, message: error.message }
+        });
+      } finally {
+        this.clearTimer(timeout);
+        this.running.delete(job.name);
+
+        if (leaseHeld) {
+          await this.leaseStore
+            .release(job.name, this.owner)
+            .catch((error) =>
+              // 釋放失敗只是讓下一輪等租約自然過期，不算工作失敗，但要看得見。
+              this.logger.error("scheduler.lease.release_failed", "Could not release a cluster job lease", {
+                job: job.name,
+                owner: this.owner,
+                error: { name: error.name, message: error.message }
+              })
+            );
+        }
+      }
+    })();
+
+    this.running.set(job.name, { promise: settled, controller });
+    await settled;
+  }
+
+  /** 停止排程並等待進行中的工作結束。冪等。 */
+  async stop({ timeoutMs } = {}) {
+    if (this.stopped) {
+      return { stopped: true, drained: true };
+    }
+
+    this.stopped = true;
+
+    for (const timer of this.timers.values()) {
+      this.clearTimer(timer);
+    }
+
+    this.timers.clear();
+
+    const inFlight = [...this.running.values()];
+
+    if (inFlight.length === 0) {
+      return { stopped: true, drained: true };
+    }
+
+    for (const { controller } of inFlight) {
+      controller.abort(new Error("Scheduler is shutting down"));
+    }
+
+    const drained = await Promise.race([
+      Promise.allSettled(inFlight.map(({ promise }) => promise)).then(() => true),
+      new Promise((resolve) => {
+        const timer = this.setTimer(() => resolve(false), timeoutMs ?? 5000);
+        timer?.unref?.();
+      })
+    ]);
+
+    if (!drained) {
+      void this.logger.warn("scheduler.stop.timed_out", "Background jobs did not finish before shutdown", {
+        jobs: [...this.running.keys()]
+      });
+    }
+
+    return { stopped: true, drained };
+  }
+
+  async shutdown() {
+    await this.stop();
+    await this.leaseStore.close?.();
+  }
+}

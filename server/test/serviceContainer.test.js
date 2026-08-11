@@ -183,6 +183,11 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["logging", "context"]
     },
     {
+      name: "scheduler",
+      lifecycle: "singleton",
+      dependencies: ["logging", "time", "mysqldatabase"]
+    },
+    {
       name: "time",
       lifecycle: "singleton",
       dependencies: []

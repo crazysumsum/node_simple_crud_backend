@@ -21,7 +21,12 @@ const FLOORS = {
   "src/framework/upload/uploadMiddleware.js": { lines: 90, branches: 75 },
   "src/framework/middleware/requestTimeout.js": { lines: 80, branches: 60 },
   "src/services/auth/JwtService.js": { lines: 95, branches: 95 },
-  "src/framework/configuration/SecretValue.js": { lines: 90, branches: 90 }
+  "src/framework/configuration/SecretValue.js": { lines: 90, branches: 90 },
+  // 排程器錯了的後果是背景工作靜靜停掉，或 cluster 工作在每個實例上重複執行。
+  // 兩者都不會在開發時被發現。
+  "src/services/scheduler/SchedulerService.js": { lines: 90, branches: 85 },
+  "src/framework/scheduler/JobLeaseStore.js": { lines: 95, branches: 95 },
+  "src/framework/scheduler/normalizeJobDefinition.js": { lines: 90, branches: 78 }
 };
 
 const serverRoot = fileURLToPath(new URL("../", import.meta.url));

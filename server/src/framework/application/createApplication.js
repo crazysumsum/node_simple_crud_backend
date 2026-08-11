@@ -105,6 +105,7 @@ class Application {
     requestLimiter,
     authStrategies,
     idempotencyManager,
+    scheduler,
     time,
     forceExit
   }) {
@@ -117,6 +118,7 @@ class Application {
     this.requestLimiter = requestLimiter;
     this.authStrategies = authStrategies;
     this.idempotencyManager = idempotencyManager;
+    this.scheduler = scheduler;
     this.time = time;
     this.forceExit = forceExit;
     this.server = null;
@@ -150,6 +152,8 @@ class Application {
       server.once("error", reject);
     });
     this.state = "started";
+    // 背景工作在開始接受請求之後才排程，讓啟動失敗的路徑上不會有半跑的工作。
+    await this.scheduler.start();
 
     const address = this.server.address();
     const activePort = typeof address === "object" ? address.port : application.port;
@@ -203,12 +207,21 @@ class Application {
       this.server,
       remainingTime()
     );
+    // 排程器與 HTTP server 同屬「工作來源」，都必須在它們使用的 store 與
+    // service 被拆掉之前停下來。放進 service 容器的反序關閉會太晚：排程器沒有
+    // 宣告依賴，反而會是最後才關的那一個。
+    const schedulerStoppedPromise = this.scheduler
+      .stop({ timeoutMs: remainingTime() })
+      .then(({ drained }) => drained)
+      .catch(() => false);
 
     await shutdownLog;
-    const [activeRequestsDrained, httpServerClosed] = await Promise.all([
-      activeRequestsDrainedPromise,
-      httpServerClosedPromise
-    ]);
+    const [activeRequestsDrained, httpServerClosed, schedulerDrained] =
+      await Promise.all([
+        activeRequestsDrainedPromise,
+        httpServerClosedPromise,
+        schedulerStoppedPromise
+      ]);
     const rateLimitStoreClosed = await closeResource(
       this.requestLimiter,
       remainingTime()
@@ -232,6 +245,7 @@ class Application {
         rejectedQueuedRequests,
         activeRequestsDrained,
         httpServerClosed,
+        schedulerDrained,
         rateLimitStoreClosed,
         idempotencyStoreClosed,
         servicesClosed: serviceShutdown.closed,
@@ -249,6 +263,7 @@ class Application {
       requestedExitCode ||
       !activeRequestsDrained ||
       !httpServerClosed ||
+      !schedulerDrained ||
       !rateLimitStoreClosed ||
       !idempotencyStoreClosed ||
       !serviceShutdown.closed ||
@@ -262,6 +277,7 @@ class Application {
       rejectedQueuedRequests,
       activeRequestsDrained,
       httpServerClosed,
+      schedulerDrained,
       rateLimitStoreClosed,
       idempotencyStoreClosed,
       servicesClosed: serviceShutdown.closed && loggingShutdown.closed
@@ -352,6 +368,9 @@ export async function createApplication({
   const context = services.require("context");
   const time = services.require("time");
   const fileTypes = services.require("filetypes");
+  // 收集必須晚於整個容器：service 在自己的 initialize() 裡看不到排在它後面才
+  // 建立的 service。與 createAuthStrategyRegistry 走訪容器的處境相同。
+  const activeScheduler = services.require("scheduler").collectFrom(services);
   let activeStrategies = strategies;
 
   try {
@@ -561,6 +580,7 @@ export async function createApplication({
       requestLimiter: activeRequestLimiter,
       authStrategies: activeStrategies,
       idempotencyManager: activeIdempotencyManager,
+      scheduler: activeScheduler,
       time,
       forceExit
     });

@@ -18,6 +18,7 @@ test("global configuration validation normalizes every configuration section", (
     "jwt",
     "logging",
     "request",
+    "scheduler",
     "security"
   ]);
   assert.equal(configuration.application.timeZone, "Asia/Hong_Kong");
