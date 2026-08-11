@@ -56,6 +56,10 @@ const loggingConfig = {
       redactedFields: [
         "password",
         "newPassword",
+        // system logger 一直有 secret，request logger 卻漏了。而 request log
+        // 在狀態碼 >= 400 時一律完整記錄 body，任何名為 secret 的欄位會明文
+        // 落進保留 30 天的檔案。
+        "secret",
         "token",
         "accessToken",
         "refreshToken",

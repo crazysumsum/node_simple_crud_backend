@@ -832,6 +832,30 @@ and the unified request lifecycle configuration. Invalid startup configuration t
 `ConfigurationError` with a `details` array containing every invalid section.
 Startup in every environment also requires `JWT_SECRET`.
 
+### Secrets In Configuration
+
+Every service receives the same whole application config object, so `jwt.secret` and
+`database.password` are reachable from anywhere. The realistic accident is not
+someone reading them deliberately — it is a config object ending up in a log entry or
+an error context, and logs are kept for 30 days.
+
+After normalization both values are `SecretValue`
+(`server/src/framework/configuration/SecretValue.js`), which separates viewing from
+using:
+
+- `JSON.stringify`, `util.inspect` and log output all yield `[REDACTED]`, so writing
+  a secret to a log is structurally impossible.
+- Reading the value requires an explicit `.reveal()`. That does not stop deliberate
+  access, and is not meant to — there is no boundary between first-party modules. It
+  makes reading a secret a greppable, reviewable act rather than a property read.
+  There are two such call sites: `JwtService` and the MySQL pool factory.
+- String coercion **throws** rather than returning `[REDACTED]`. A placeholder would
+  let `jwt.sign(payload, config.jwt.secret)` silently sign every token with the
+  literal text `[REDACTED]`, with nothing in the failure pointing at the cause.
+
+`BaseService` also holds `config` as a non-enumerable property, so serializing a
+service does not drag the whole configuration along with it.
+
 ## MySQL Database Service
 
 Handlers receive the shared `MySqlDatabaseService` through dependency injection under
