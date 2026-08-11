@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { FileLogWriter } from "../src/services/logging/fileLogWriter.js";
 import { Logger } from "../src/services/logging/Logger.js";
+import { normalizeLoggerConfig } from "../src/services/logging/normalizeLoggingConfig.js";
 import { createRequestLogger } from "../src/framework/middleware/requestLogger.js";
 import { createTestTime } from "../test-support/createTestTime.js";
 
@@ -19,6 +20,15 @@ const baseConfig = {
   redactedFields: ["password", "token"]
 };
 const time = createTestTime();
+
+/**
+ * Logger 會自己正規化設定，但直接建構 FileLogWriter 就不會——少了 fileMode
+ * 這類欄位，writer 會拿著 undefined 去 chmod。要測的是 writer 在正式環境
+ * 拿得到的那份設定，所以這裡走同一條正規化。
+ */
+function writerConfig(overrides) {
+  return normalizeLoggerConfig({ ...baseConfig, ...overrides }, "request");
+}
 
 class MockResponse extends EventEmitter {
   constructor() {
@@ -333,11 +343,7 @@ test("file writer appends JSONL and removes expired log files", async (t) => {
   await utimes(oldFile, oldDate, oldDate);
 
   const writer = new FileLogWriter({
-    config: {
-      ...baseConfig,
-      directory,
-      retentionDays: 2
-    },
+    config: writerConfig({ directory, retentionDays: 2 }),
     time
   });
   const entry = {
@@ -371,7 +377,7 @@ test("file writer reuses its resolved target instead of rescanning per write", a
   }
 
   const writer = new FileLogWriter({
-    config: { ...baseConfig, directory, cleanupIntervalHours: 24 },
+    config: writerConfig({ directory, cleanupIntervalHours: 24 }),
     time
   });
   await writer.ready;
@@ -419,7 +425,7 @@ test("file writer keeps log files and their directory owner-only", async (t) => 
   await chmod(legacyFile, 0o644);
 
   const writer = new FileLogWriter({
-    config: { ...baseConfig, directory, fileMode: 0o600, directoryMode: 0o700 },
+    config: writerConfig({ directory, fileMode: 0o600, directoryMode: 0o700 }),
     time
   });
   await writer.ready;
@@ -455,11 +461,7 @@ test("file writer keeps log files and their directory owner-only", async (t) => 
   }
 });
 
-test("logging config rejects an out-of-range file mode", async () => {
-  const { normalizeLoggerConfig } = await import(
-    "../src/services/logging/normalizeLoggingConfig.js"
-  );
-
+test("logging config rejects an out-of-range file mode", () => {
   // 字串以八進位解讀，避免誤寫十進位 600。
   assert.equal(
     normalizeLoggerConfig({ ...baseConfig, directory: "logs", fileMode: "640" }, "request")
@@ -496,11 +498,7 @@ test("file writer rotates logs before the size limit is exceeded", async (t) => 
   };
   const lineSize = Buffer.byteLength(`${JSON.stringify(entry)}\n`, "utf8");
   const writer = new FileLogWriter({
-    config: {
-      ...baseConfig,
-      directory,
-      maxFileSizeBytes: lineSize + 10
-    },
+    config: writerConfig({ directory, maxFileSizeBytes: lineSize + 10 }),
     time
   });
 
