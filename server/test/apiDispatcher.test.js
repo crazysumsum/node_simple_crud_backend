@@ -8,11 +8,7 @@ import {
   AuthStrategyRegistry,
   createAuthStrategyRegistry
 } from "../src/framework/auth/authStrategyRegistry.js";
-import {
-  issueAccessToken,
-  validateJwtConfig,
-  verifyAccessToken
-} from "../src/framework/auth/jwtService.js";
+import jwtConfig from "../config/jwt.js";
 import { createServiceContainer } from "../src/framework/services/createServiceContainer.js";
 import { RequestContextService } from "../src/services/context/RequestContextService.js";
 import {
@@ -37,11 +33,10 @@ const time = createTestTime();
 const requestContext = new RequestContextService({ services: servicesWithTime(time) });
 // 策略現在是一般 service，所以測試也經由真實的 container 取得它們——
 // 這條路徑與 Application Factory 完全相同。
+// jwt 也是同一個目錄裡被發現的一般 service，不再由測試手動組裝。
 const strategyContainer = await createServiceContainer({
-  config: {},
+  config: { jwt: jwtConfig },
   values: {
-    jwtConfig: validateJwtConfig(),
-    verifyToken: (token) => verifyAccessToken(token),
     // 策略宣告依賴 logging 以固定初始化順序，測試提供同形狀的替身。
     logging: { logger: silentLogger }
   },
@@ -50,6 +45,8 @@ const strategyContainer = await createServiceContainer({
   },
   options: {}
 });
+const jwtService = strategyContainer.require("jwt");
+const issueAccessToken = (payload, options) => jwtService.issue(payload, options);
 const defaultAuthStrategies = createAuthStrategyRegistry({
   services: strategyContainer,
   logger: silentLogger

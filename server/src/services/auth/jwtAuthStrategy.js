@@ -4,42 +4,37 @@ import { BaseAuthStrategy } from "../../framework/auth/BaseAuthStrategy.js";
 export class JwtAuthStrategy extends BaseAuthStrategy {
   static authType = "jwt";
 
-  // 一般的 service metadata。jwtConfig 與 verifyToken 由 Application Factory
-  // 註冊成 container value，所以這裡照常宣告成依賴即可。
+  // 完全一般的 service metadata：簽發與驗證都交給 jwt service，這個策略只
+  // 負責把 token 從 HTTP header 裡取出來。
   static service = Object.freeze({
     name: "auth.jwt",
     lifecycle: "singleton",
-    dependencies: ["jwtConfig", "verifyToken", "logging"],
+    dependencies: ["jwt", "logging"],
     eager: true
   });
 
   constructor({ config, services, options } = {}) {
     super({ config, services, options });
-    this.jwtConfig = services.require("jwtConfig");
-    this.verifyToken = services.require("verifyToken");
-
-    if (typeof this.verifyToken !== "function") {
-      throw new TypeError("JwtAuthStrategy requires a verifyToken function");
-    }
+    this.jwt = services.require("jwt");
   }
 
   async authenticate(req) {
-    const authorization = req.get(this.jwtConfig.headerName);
+    const authorization = req.get(this.jwt.headerName);
     const [scheme, token, extra] = String(authorization || "").trim().split(/\s+/);
 
     if (
       !token ||
       extra ||
-      scheme.toLowerCase() !== this.jwtConfig.authScheme.toLowerCase()
+      scheme.toLowerCase() !== this.jwt.authScheme.toLowerCase()
     ) {
       throw new AuthenticationError(
         "JWT_REQUIRED",
-        `A valid ${this.jwtConfig.authScheme} token is required`
+        `A valid ${this.jwt.authScheme} token is required`
       );
     }
 
     try {
-      const claims = this.verifyToken(token);
+      const claims = this.jwt.verify(token);
       return { type: this.authType, claims };
     } catch (error) {
       // 客戶端只會收到籠統的 JWT_INVALID——「簽章錯誤」與「已過期」的差別

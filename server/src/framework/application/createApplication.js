@@ -4,7 +4,6 @@ import helmet from "helmet";
 import { resolveApiDefinitions } from "../api/apiDefinitionResolver.js";
 import { createHandlerRegistry } from "../api/handlerRegistry.js";
 import { createAuthStrategyRegistry } from "../auth/authStrategyRegistry.js";
-import { verifyAccessToken } from "../auth/jwtService.js";
 import { createAuthorizationPolicyRegistry } from "../authorization/authorizationPolicyRegistry.js";
 import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
 import {
@@ -325,11 +324,7 @@ export async function createApplication({
     handlerServices,
       serviceValues
   );
-  const values = {
-    jwtConfig: configuration.jwt,
-    verifyToken: (token) => verifyAccessToken(token, { config: configuration.jwt }),
-    ...customValues
-  };
+  const values = { ...customValues };
   const overrides = { ...(serviceOverrides || {}) };
   const factories = { ...(serviceFactories || {}) };
 

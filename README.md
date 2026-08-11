@@ -255,8 +255,14 @@ The built-in authentication types are `public` and `jwt`. JWT settings are store
 `server/config/jwt.js`. `JWT_SECRET` is required in every environment and has no
 built-in default, so the application refuses to start without it. Generate one with
 `openssl rand -base64 48`.
-After a successful login, handlers can call `issueAccessToken` from
-`server/src/framework/auth/jwtService.js`.
+Signing and verification live in the `jwt` service
+(`server/src/services/auth/JwtService.js`), which is discovered and injected like any
+other service. A login handler declares it as a dependency and calls
+`this.jwt.issue(payload, { subject })`; `verify(token)` is what the JWT strategy uses.
+The normalized config is a private field, so the service's own surface is just
+`issue()`, `verify()`, `headerName`, `authScheme` and `expiresIn` — no caller needs
+the secret. (Every service still receives the whole application config, so
+`config.jwt.secret` remains readable; that is a separate concern.)
 
 An authentication strategy is an ordinary service. It lives anywhere under
 `server/src/services`, is found by the same discovery that loads every other service,
