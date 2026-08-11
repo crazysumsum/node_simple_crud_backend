@@ -628,6 +628,38 @@ export class UserService extends BaseService {
 }
 ```
 
+### Turning A Service Off
+
+`static service.enabled` controls whether a service is loaded at all. It defaults to
+`true`, so existing services need no change.
+
+```js
+static service = {
+  name: "reportExport",
+  lifecycle: "singleton",
+  dependencies: ["mysqldatabase"],
+  enabled: false
+};
+```
+
+A disabled service is never constructed and never appears in the container, so
+`names()`, `describe()` and `require()` behave as though it does not exist. It is
+still listed under `disabledServices` in the `service.registration.completed` startup
+log — a service quietly missing from a deployment is exactly the thing that costs an
+afternoon to work out.
+
+**Disabling a service that something still depends on fails at startup**, before any
+port is opened, and the message says the dependency is disabled rather than missing:
+
+```
+Service "reports" requires "database", which is disabled by its static
+service.enabled flag. Enable it, or stop depending on it.
+```
+
+Whole groups can be switched off together: a disabled service is never visited, so
+its own dependencies need not exist. Only a boolean is accepted — treating `"false"`
+or `0` as disabled would let one mistyped value make a service silently disappear.
+
 **`dependencies` is enforced, not advisory.** `services.get()` and
 `services.require()` see only what the service declared, plus instances already
 created in the current request scope. Reaching an undeclared service throws and the

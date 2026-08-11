@@ -360,7 +360,10 @@ export async function createApplication({
       "Service discovery and initialization completed",
       {
         serviceCount: services.describe().length,
-        services: services.describe()
+        services: services.describe(),
+        // 被停用的 service 不會出現在上面那份清單裡。不把它們列出來，
+        // 「這個 service 為什麼不見了」就只能靠翻原始碼。
+        disabledServices: services.describeDisabled()
       }
     );
 

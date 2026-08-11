@@ -61,9 +61,19 @@ export class ServiceContainer {
     this.initialized = false;
     this.shutdownStarted = false;
 
+    // 停用的 service 不會進 definitions，所以永遠不會被建構，也不出現在
+    // names()／describe() 裡。但名字要留著：有人依賴它時，「這個 service 被
+    // 停用了」和「這個 service 不存在」是兩件完全不同的事，修法也不同。
+    this.disabledServices = new Map();
+
     for (const definition of definitions) {
-      if (this.definitions.has(definition.name)) {
+      if (this.definitions.has(definition.name) || this.disabledServices.has(definition.name)) {
         throw new Error(`Duplicate service definition: ${definition.name}`);
+      }
+
+      if (definition.enabled === false) {
+        this.disabledServices.set(definition.name, definition);
+        continue;
       }
 
       this.definitions.set(definition.name, definition);
@@ -113,8 +123,12 @@ export class ServiceContainer {
 
       for (const dependency of definition.dependencies) {
         if (!this.definitions.has(dependency) && !this.instances.has(dependency)) {
+          // 停用一個還有人依賴的 service 必須在啟動時就失敗，而且要說清楚是
+          // 「被停用」而不是「不存在」——後者會讓人去找一個根本沒打錯的名字。
           throw new Error(
-            `Service "${name}" requires missing dependency "${dependency}"`
+            this.disabledServices.has(dependency)
+              ? `Service "${name}" requires "${dependency}", which is disabled by its static service.enabled flag. Enable it, or stop depending on it.`
+              : `Service "${name}" requires missing dependency "${dependency}"`
           );
         }
 
@@ -177,7 +191,9 @@ export class ServiceContainer {
   require(name) {
     if (!this.instances.has(name)) {
       throw new Error(
-        `Service is not initialized: ${name}. Use resolve() for lazy or scoped services.`
+        this.disabledServices.has(name)
+          ? `Service is disabled: ${name}. Its static service.enabled flag is false.`
+          : `Service is not initialized: ${name}. Use resolve() for lazy or scoped services.`
       );
     }
 
@@ -186,6 +202,17 @@ export class ServiceContainer {
 
   names() {
     return [...new Set([...this.definitions.keys(), ...this.instances.keys()])];
+  }
+
+  /** 被 static service.enabled 排除掉的 service，供啟動日誌列出。 */
+  describeDisabled() {
+    return [...this.disabledServices.values()].map((definition) =>
+      Object.freeze({
+        name: definition.name,
+        className: definition.ServiceClass?.name || null,
+        module: definition.moduleUrl || null
+      })
+    );
   }
 
   describe() {
@@ -212,7 +239,11 @@ export class ServiceContainer {
     const definition = this.definitions.get(name);
 
     if (!definition) {
-      throw new Error(`Service is not registered: ${name}`);
+      throw new Error(
+        this.disabledServices.has(name)
+          ? `Service is disabled: ${name}. Its static service.enabled flag is false.`
+          : `Service is not registered: ${name}`
+      );
     }
 
     if (definition.lifecycle === "request") {
@@ -304,9 +335,15 @@ export class ServiceContainer {
         const service = get(name);
 
         if (service === undefined) {
+          if (this.has(name)) {
+            throw new Error(
+              `Service "${name}" was not declared as a dependency. Add it to static service.dependencies, or use resolve() for lazy and request-scoped services.`
+            );
+          }
+
           throw new Error(
-            this.has(name)
-              ? `Service "${name}" was not declared as a dependency. Add it to static service.dependencies, or use resolve() for lazy and request-scoped services.`
+            this.disabledServices.has(name)
+              ? `Service is disabled: ${name}. Its static service.enabled flag is false.`
               : `Service is not registered: ${name}`
           );
         }
