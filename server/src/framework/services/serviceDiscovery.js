@@ -61,11 +61,20 @@ function normalizeServiceDefinition(ServiceClass, moduleUrl) {
     );
   }
 
+  // 只接受布林值。undefined 以外的隨手值（0、""、"false"）如果被當成停用，
+  // 一個打錯的設定就會讓 service 靜靜消失；寧可在啟動時直接拒絕。
+  if (metadata.enabled !== undefined && typeof metadata.enabled !== "boolean") {
+    throw new Error(
+      `${ServiceClass.name} in ${moduleUrl} has a non-boolean service "enabled" flag`
+    );
+  }
+
   return Object.freeze({
     name,
     lifecycle,
     dependencies: Object.freeze([...new Set(dependencies)]),
     eager: metadata.eager !== false,
+    enabled: metadata.enabled !== false,
     ServiceClass,
     moduleUrl
   });
