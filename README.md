@@ -789,7 +789,7 @@ npm run verify
 | Gate | Command | Fails on |
 | --- | --- | --- |
 | Lint | `npm run lint` | any ESLint error (`eslint.config.js`) |
-| Tests + coverage | `npm run test:coverage` | a failing test, or coverage under 85% lines / 68% branches / 82% functions |
+| Tests + coverage | `npm run test:coverage` | a failing test, global coverage under 89% lines / 76% branches / 86% functions, or a per-file floor |
 | Dependencies | `npm run security:audit` | a high or critical advisory |
 
 `npm run lint:fix` applies the autofixable subset. `npm test` runs the suite without
@@ -799,6 +799,21 @@ The lint rules target defects rather than formatting, because the framework lean
 duck typing that no type checker is validating. Coverage thresholds sit just under
 the current numbers so they catch regressions without failing on noise; raise them
 as coverage improves.
+
+### Per-File Coverage Floors
+
+A global threshold cannot protect an individual file. The two riskiest modules here
+are a small share of total lines, so both could fall to 60% while the global gate
+stays green. `server/scripts/checkCoverageFloors.js` therefore enforces a floor per
+file for a named list of high-risk modules — transaction cancellation and rollback,
+idempotency identity scoping and its degraded responses, upload handling, secret
+handling.
+
+Add a file to that list when a regression in it would be expensive and unlikely to be
+noticed during development. Do not add files just to raise a number: a test that only
+asserts a `throw` statement exists is a maintenance cost, not a safety net. A file in
+the list that disappears from the coverage report is also a failure, because a
+renamed file would otherwise silently drop its floor.
 
 GitHub Actions runs all three on pull requests, pushes to `main`, manual dispatches,
 and every Monday through `.github/workflows/security-audit.yml`.
