@@ -266,6 +266,21 @@ export class ServiceContainer {
     return this.initializationPromises.get(name);
   }
 
+  /**
+   * 建立單一 service 所看到的 services 物件。
+   *
+   * get() 與 require() 只看得見「自己宣告過的依賴」與「當前 request scope 內的
+   * 實例」。這裡以前會落回 this.get(name)，於是任何已初始化的 singleton 不宣告
+   * 也拿得到——宣告因此形同虛設，而容器的初始化與關機順序完全照宣告排：
+   *
+   * - 沒宣告的耦合會讓關機順序變成碰運氣。被使用的一方可能先關閉，使用它的一方
+   *   在自己的 shutdown 裡就會撞上已關閉的資源，而發現順序是按檔名排的，改個
+   *   檔名就可能翻轉結果。
+   * - 啟動日誌記錄的依賴圖會少掉那條邊，循環偵測也看不到它。
+   *
+   * resolve() 刻意保留為逃生口：延遲初始化的 singleton 與 request-scoped
+   * service 本來就無法宣告成建構期依賴。
+   */
   createServiceAccess(dependencies, scope) {
     const get = (name) => {
       const activeScope = scope || this.scopeStorage.getStore() || null;
@@ -278,18 +293,21 @@ export class ServiceContainer {
         return activeScope.instances.get(name);
       }
 
-      return this.get(name);
+      return undefined;
     };
 
     return Object.freeze({
-      has: (name) => dependencies.has(name) || this.has(name),
+      // 「我拿得到嗎」，而不是「容器裡有沒有」——後者會誘使呼叫端去拿沒宣告的東西。
+      has: (name) => get(name) !== undefined,
       get,
       require: (name) => {
         const service = get(name);
 
-        if (service === undefined && !this.instances.has(name)) {
+        if (service === undefined) {
           throw new Error(
-            `Service is not initialized: ${name}. Declare it in static service.dependencies.`
+            this.has(name)
+              ? `Service "${name}" was not declared as a dependency. Add it to static service.dependencies, or use resolve() for lazy and request-scoped services.`
+              : `Service is not registered: ${name}`
           );
         }
 

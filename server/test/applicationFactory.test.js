@@ -346,7 +346,8 @@ test("business handlers and auth strategies are auto-discovered from implementat
     static service = {
       name: "auth.apiKey",
       lifecycle: "singleton",
-      dependencies: ["acceptedApiKey"],
+      // logging 是 BaseAuthStrategy 用的，自訂策略同樣要宣告。
+      dependencies: ["logging", "acceptedApiKey"],
       eager: true
     };
 

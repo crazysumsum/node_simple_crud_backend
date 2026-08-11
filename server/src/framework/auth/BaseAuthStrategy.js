@@ -23,6 +23,17 @@ export class BaseAuthStrategy extends BaseService {
 
     this.authType = authType;
     this.logger = systemLoggerFromServices(services);
+
+    // 基底類別自己用了 logging，所以每個策略都必須宣告它。以前沒有這個檢查時
+    // auth.public 靠運氣運作：它宣告 dependencies: []，而 logging 之所以已經
+    // 初始化，只是因為 auth.jwt 剛好宣告了它、且字母排序在前。移除 JWT 策略
+    // （只用 API key 的服務就會這麼做）就會讓這裡拿到 null，而所有日誌呼叫都
+    // 是可選鏈——不會爆，只是安靜地不再記錄認證事件。
+    if (!this.logger) {
+      throw new TypeError(
+        `${new.target.name} could not resolve the system logger. Add "logging" to its static service.dependencies.`
+      );
+    }
   }
 
   async authenticate(_req) {

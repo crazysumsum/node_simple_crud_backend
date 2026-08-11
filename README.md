@@ -628,6 +628,25 @@ export class UserService extends BaseService {
 }
 ```
 
+**`dependencies` is enforced, not advisory.** `services.get()` and
+`services.require()` see only what the service declared, plus instances already
+created in the current request scope. Reaching an undeclared service throws and the
+message names the fix.
+
+That strictness is what makes the ordering guarantees real. Initialization order and
+its reverse — shutdown order — are computed from the declared graph alone, so an
+undeclared coupling makes ordering a matter of luck: the service you depend on may be
+closed before you are, and your own `shutdown()` then fails against a closed
+resource. Because discovery sorts by filename, renaming a file can flip the outcome.
+An undeclared edge is also invisible to the startup log and to cycle detection.
+
+`resolve()` is the deliberate exception, because lazy singletons and request-scoped
+services cannot be declared as construction-time dependencies.
+
+Note that a base class counts. `BaseAuthStrategy` reads `logging`, so every strategy
+must declare it even when the strategy itself never logs; it fails at startup with a
+message saying so rather than leaving a null logger behind.
+
 `singleton` services are constructed once in dependency order and shared by handlers,
 authentication strategies and other services. Startup fails for missing dependencies,
 cycles, duplicate names, or any rejected `initialize()` call. No HTTP port starts
