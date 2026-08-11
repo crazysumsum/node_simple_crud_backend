@@ -132,7 +132,9 @@ function createScheduler({
       random
     }
   });
-  scheduler.collectFrom(fakeServices({ ...services, ...jobs }));
+  for (const instance of Object.values({ ...services, ...jobs })) {
+    scheduler.register(instance);
+  }
   return { scheduler, timers, logger, leaseStore };
 }
 
@@ -571,6 +573,40 @@ test("invalid job declarations fail at startup, not on first tick", () => {
     jobs: { demo: jobService([{ name: "demo.ok", method: "work", intervalMs: 1000 }]) }
   });
   assert.equal(scheduler.describeJobs()[0].timeoutMs, 30000);
+});
+
+test("registering without static jobs fails loudly", () => {
+  const { scheduler } = createScheduler();
+  const plain = {};
+  plain.constructor = { name: "PlainService" };
+
+  // 呼叫了 register() 卻沒有東西可註冊，多半是把 static jobs 寫錯地方了。
+  assert.throws(
+    () => scheduler.register(plain),
+    /called scheduler.register\(\) without declaring static jobs/
+  );
+
+  const wrongShape = {};
+  wrongShape.constructor = { name: "WrongService", jobs: { name: "not-an-array" } };
+  assert.throws(() => scheduler.register(wrongShape), /static jobs must be an array/);
+});
+
+test("a job submitted after start is scheduled without the caller sequencing it", async () => {
+  const { scheduler, timers } = createScheduler({ random: () => 0 });
+
+  await scheduler.start();
+
+  // service 在自己的 initialize() 裡提交，通常早於 start()；晚到的也要能運作，
+  // 呼叫端不需要知道排程器啟動了沒有。
+  const late = jobService([
+    { name: "demo.late", method: "work", intervalMs: 1000, timeoutMs: 100 }
+  ]);
+  scheduler.register(late);
+
+  await timers.advance(800);
+  assert.equal(late.calls.length, 1);
+
+  await scheduler.stop();
 });
 
 test("two services cannot declare the same job name", () => {

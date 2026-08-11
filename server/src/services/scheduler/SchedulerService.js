@@ -7,14 +7,20 @@ import { BaseService } from "../../framework/services/BaseService.js";
 /**
  * 背景定時作業。
  *
- * 工作宣告在提供它的 service 的 static jobs 上，由 Application Factory 在容器
- * 初始化完成後呼叫 collectFrom() 收集——service 在自己的 initialize() 裡看不到
- * 排在它後面才建立的 service，所以收集必須晚於整個容器。這與
- * createAuthStrategyRegistry 走訪容器的做法相同。
+ * 工作宣告在提供它的 service 的 static jobs 上，並由那個 service 自己呼叫
+ * register() 提交——排程器不走訪容器。這是 push 而不是 pull，差別在於：
+ *
+ * - Application Factory 完全不需要知道排程器的存在。先前由 Factory 呼叫
+ *   collectFrom() 的寫法，讓「排程器被 static service.enabled 停用」直接變成
+ *   整個應用無法啟動。
+ * - 依賴方向是明示的：需要排程的 service 把 "scheduler" 宣告成依賴，容器因此
+ *   保證排程器先建立，收集時機的問題根本不存在。
+ * - 排程關係會出現在依賴圖與啟動日誌裡，不再是隱形的一條邊。
  *
  * 排程器是「工作來源」而不是「葉子資源」：它必須在它所使用的 service 被拆掉
- * 之前先停下來，所以 Factory 會在關閉 HTTP server 的同一階段呼叫 stop()。容器
- * 之後還會再呼叫一次 shutdown()，兩者都是冪等的。
+ * 之前先停下來，所以 Factory 會在關閉 HTTP server 的同一階段呼叫 stop()。那是
+ * 生命週期的先後安排，與工作的收集無關。容器之後還會再呼叫一次 shutdown()，
+ * 兩者都是冪等的。
  */
 export class SchedulerService extends BaseService {
   static service = Object.freeze({
@@ -48,46 +54,58 @@ export class SchedulerService extends BaseService {
     this.stopped = false;
   }
 
-  /** 走訪容器，收集每個 service 上宣告的 static jobs。 */
-  collectFrom(services) {
-    if (this.started) {
-      throw new Error("Scheduler jobs must be collected before start()");
+  /**
+   * 由 service 自己提交它宣告的 static jobs，通常在自己的 initialize() 裡呼叫。
+   * 呼叫端不需要在意排程器啟動了沒有：已經啟動之後才提交的工作會立即排入。
+   */
+  register(instance) {
+    const serviceName =
+      instance?.constructor?.service?.name || instance?.constructor?.name || "unknown";
+    const declared = instance?.constructor?.jobs;
+
+    if (!declared) {
+      throw new Error(
+        `Service "${serviceName}" called scheduler.register() without declaring static jobs`
+      );
     }
 
-    for (const { name } of services.describe()) {
-      const instance = services.get(name);
-      const declared = instance?.constructor?.jobs;
+    if (!Array.isArray(declared)) {
+      throw new Error(`Service "${serviceName}" static jobs must be an array`);
+    }
 
-      if (!declared) {
-        continue;
+    for (const source of declared) {
+      const job = normalizeJobDefinition(source, instance, serviceName, this.schedulerConfig);
+
+      if (this.jobs.has(job.name)) {
+        throw new Error(
+          `Duplicate job name "${job.name}" declared by services "${this.jobs.get(job.name).serviceName}" and "${serviceName}"`
+        );
       }
 
-      if (!Array.isArray(declared)) {
-        throw new Error(`Service "${name}" static jobs must be an array`);
-      }
+      this.jobs.set(job.name, job);
+      this.stats.set(job.name, {
+        runs: 0,
+        failures: 0,
+        skippedOverlapping: 0,
+        skippedNotLeader: 0,
+        timeouts: 0,
+        consecutiveFailures: 0
+      });
 
-      for (const source of declared) {
-        const job = normalizeJobDefinition(source, instance, name, this.schedulerConfig);
-
-        if (this.jobs.has(job.name)) {
-          throw new Error(
-            `Duplicate job name "${job.name}" declared by services "${this.jobs.get(job.name).serviceName}" and "${name}"`
-          );
-        }
-
-        this.jobs.set(job.name, job);
-        this.stats.set(job.name, {
-          runs: 0,
-          failures: 0,
-          skippedOverlapping: 0,
-          skippedNotLeader: 0,
-          timeouts: 0,
-          consecutiveFailures: 0
-        });
+      if (this.started && !this.stopped && this.schedulerConfig.enabled && job.enabled) {
+        void this.prepareAndSchedule(job);
       }
     }
 
     return this;
+  }
+
+  async prepareAndSchedule(job) {
+    if (job.scope === "cluster") {
+      await this.leaseStore.prepare([job.name]);
+    }
+
+    this.schedule(job, this.initialDelayFor(job));
   }
 
   describeJobs() {

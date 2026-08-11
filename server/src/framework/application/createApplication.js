@@ -153,7 +153,7 @@ class Application {
     });
     this.state = "started";
     // 背景工作在開始接受請求之後才排程，讓啟動失敗的路徑上不會有半跑的工作。
-    await this.scheduler.start();
+    await this.scheduler?.start();
 
     const address = this.server.address();
     const activePort = typeof address === "object" ? address.port : application.port;
@@ -210,8 +210,9 @@ class Application {
     // 排程器與 HTTP server 同屬「工作來源」，都必須在它們使用的 store 與
     // service 被拆掉之前停下來。放進 service 容器的反序關閉會太晚：排程器沒有
     // 宣告依賴，反而會是最後才關的那一個。
-    const schedulerStoppedPromise = this.scheduler
-      .stop({ timeoutMs: remainingTime() })
+    const schedulerStoppedPromise = Promise.resolve(
+      this.scheduler?.stop({ timeoutMs: remainingTime() }) ?? { drained: true }
+    )
       .then(({ drained }) => drained)
       .catch(() => false);
 
@@ -368,9 +369,10 @@ export async function createApplication({
   const context = services.require("context");
   const time = services.require("time");
   const fileTypes = services.require("filetypes");
-  // 收集必須晚於整個容器：service 在自己的 initialize() 裡看不到排在它後面才
-  // 建立的 service。與 createAuthStrategyRegistry 走訪容器的處境相同。
-  const activeScheduler = services.require("scheduler").collectFrom(services);
+  // 工作由各個 service 自己向排程器提交，所以這裡不碰 job，只負責生命週期的
+  // 先後——與 HTTP server 同一類。用 get() 而非 require()：排程器被停用的部署
+  // 不該因此無法啟動。
+  const activeScheduler = services.get("scheduler") ?? null;
   let activeStrategies = strategies;
 
   try {

@@ -698,16 +698,16 @@ const user = this.services.require("user");
 ## Background Jobs
 
 Recurring work is declared with `static jobs` on the service that provides it, next to
-`static service`. There is no third discovery mechanism: the `scheduler` service walks
-the container after startup and collects what each service declared, the same way the
-authentication strategy registry does.
+`static service`. There is no third discovery mechanism, and the scheduler does not
+scan anything: a service that wants scheduling declares `scheduler` as a dependency
+and submits its own jobs.
 
 ```js
 export class ReportService extends BaseService {
   static service = {
     name: "report",
     lifecycle: "singleton",
-    dependencies: ["mysqldatabase", "logging"],
+    dependencies: ["scheduler", "mysqldatabase", "logging"],
     eager: true
   };
 
@@ -716,10 +716,26 @@ export class ReportService extends BaseService {
     { name: "report.monthly", method: "sendMonthly", intervalMs: 3600000, scope: "cluster" }
   ];
 
+  async initialize() {
+    this.services.require("scheduler").register(this);
+  }
+
   async refreshCache(signal) { /* ... */ }
   async sendMonthly(signal) { /* ... */ }
 }
 ```
+
+Pushing rather than being collected keeps the Application Factory out of it entirely.
+It also makes the dependency real: because `scheduler` is declared, the container
+guarantees it exists before `initialize()` runs, so there is no collection-timing
+problem, and the scheduling relationship shows up in the dependency graph instead of
+being an invisible edge. Disabling the scheduler with `static service.enabled` then
+does the obvious thing — the application still starts, and any service that declared
+it as a dependency fails loudly instead of silently losing its jobs.
+
+The cost of pushing is that `static jobs` without a `register()` call schedules
+nothing. `scheduler.started` lists everything registered, which is where to look when
+a job does not run.
 
 | Field | Meaning |
 | --- | --- |
