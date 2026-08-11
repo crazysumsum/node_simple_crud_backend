@@ -157,9 +157,10 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["jwt", "logging"]
     },
     {
+      // 自己不記錄任何東西，但 BaseAuthStrategy 會取用 logging。
       name: "auth.public",
       lifecycle: "singleton",
-      dependencies: []
+      dependencies: ["logging"]
     },
     {
       name: "context",

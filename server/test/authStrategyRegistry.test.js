@@ -21,14 +21,21 @@ async function containerWith(strategyClasses, values = {}) {
       ServiceClass,
       moduleUrl: `virtual:${ServiceClass.name}`
     })),
-    values
+    values: { logging: { logger: silentLogger }, ...values }
   });
   await container.initialize();
   return container;
 }
 
 function strategyService(name, dependencies = []) {
-  return Object.freeze({ name, lifecycle: "singleton", dependencies, eager: true });
+  // BaseAuthStrategy 的建構子會取用 logging，所以每個策略都必須宣告它——
+  // 容器只會把宣告過的依賴交給 service。
+  return Object.freeze({
+    name,
+    lifecycle: "singleton",
+    dependencies: ["logging", ...dependencies],
+    eager: true
+  });
 }
 
 test("auth strategies are collected from the service container", async () => {
