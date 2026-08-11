@@ -43,4 +43,8 @@ export class LoggerRegistry {
   async flush() {
     await Promise.all([...this.loggers.values()].map((logger) => logger.flush()));
   }
+
+  async cleanup() {
+    await Promise.all([...this.loggers.values()].map((logger) => logger.cleanup?.()));
+  }
 }

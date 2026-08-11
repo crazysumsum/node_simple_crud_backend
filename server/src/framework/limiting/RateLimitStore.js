@@ -5,6 +5,12 @@ export class RateLimitStore {
     throw new Error(`${this.constructor.name} must implement consume()`);
   }
 
+  /**
+   * 週期性清除過期項目，由排程器呼叫。共用 adapter（Redis 之類）多半有原生
+   * TTL，不需要做任何事，所以預設是 no-op。
+   */
+  async purgeExpired(_options) {}
+
   async close() {}
 }
 
@@ -48,6 +54,21 @@ export class MemoryRateLimitStore extends RateLimitStore {
       return;
     }
 
+    this.purge(now, cutoff);
+  }
+
+  /**
+   * 排程器驅動的清理，不看 lastCleanupAt。
+   *
+   * consume() 觸發的 cleanup() 只在有流量時才跑，所以閒置期間過期的項目會一直
+   * 留在記憶體裡。這條路徑讓清理與流量脫鉤。
+   */
+  async purgeExpired({ windowMs }) {
+    const now = this.now();
+    this.purge(now, now - windowMs);
+  }
+
+  purge(now, cutoff) {
     for (const [key, timestamps] of this.entries) {
       const active = timestamps.filter((timestamp) => timestamp > cutoff);
 

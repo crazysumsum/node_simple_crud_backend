@@ -19,11 +19,22 @@ function requestPath(req) {
 }
 
 export class RequestLimiter {
+  // 排程器讀這裡來排定工作，與 service 上的 static jobs 是同一份契約。
+  static jobs = Object.freeze([
+    {
+      name: "requestLimits.purgeExpired",
+      method: "purgeExpired",
+      intervalMs: 60_000,
+      timeoutMs: 10_000
+    }
+  ]);
+
   constructor({
     config = requestConfig.limits,
     logger,
     time,
-    store
+    store,
+    scheduler = null
   } = {}) {
     this.config = normalizeRequestLimitsConfig(config);
     this.logger = logger;
@@ -55,6 +66,16 @@ export class RequestLimiter {
     this.queue = [];
     this.shuttingDown = false;
     this.idleWaiters = new Set();
+
+    // 限流器不是 service（它在容器建立之後才由 Application Factory 組出來），
+    // 所以排程器是以協作者的身分傳進來的，和 logger、time 一樣。它自己把工作
+    // 送出去，維持 push 模式。沒有排程器時仍會走 consume() 觸發的清理。
+    scheduler?.register(this);
+  }
+
+  /** 由排程器呼叫，讓過期項目的清除不再依賴有沒有流量。 */
+  async purgeExpired() {
+    await this.store.purgeExpired?.({ windowMs: this.config.ipWindowMs });
   }
 
   middleware() {

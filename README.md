@@ -783,6 +783,28 @@ phase — before the stores and services it uses are torn down. Leaving it to th
 container's reverse-dependency shutdown would stop it *last*, firing jobs at an
 already-closed connection pool.
 
+### Built-In Jobs
+
+| Job | Every | Why |
+| --- | --- | --- |
+| `logging.retentionCleanup` | 1 hour | Deletes log files past `retentionDays` |
+| `requestLimits.purgeExpired` | 1 minute | Drops expired rate-limit windows |
+
+Both used to run only as a side effect of activity — log cleanup from `write()`, rate
+limit cleanup from `consume()`. A server with no traffic therefore never cleaned up,
+so log files outlived their configured retention indefinitely. Each hourly run still
+respects the profile's own `cleanupIntervalHours`, so the existing configuration means
+exactly what it did before; only the trigger changed.
+
+`RequestLimiter` is not a service — the factory builds it after the container — so the
+scheduler is handed to it as a collaborator alongside `logger` and `time`, and it
+submits its own job. Without a scheduler it falls back to the activity-triggered path.
+
+`LogRetentionService` exists as a separate service rather than a job on
+`LoggingService` because the scheduler depends on `logging`; the reverse dependency
+would be a cycle and the container rejects it at startup. A third service depending on
+both is the way out.
+
 ### Configuration
 
 `server/config/scheduler.js` holds global defaults and per-job overrides by name, so

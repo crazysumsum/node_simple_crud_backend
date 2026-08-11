@@ -31,6 +31,11 @@ export class LoggingService extends BaseService {
     return this.loggers.require(name);
   }
 
+  /** 讓每個 profile 檢查一次是否該清除過期檔案。由 LogRetentionService 排程。 */
+  async cleanup() {
+    await this.loggers.cleanup?.();
+  }
+
   async shutdown() {
     if (!this.loggerManagedByRegistry) {
       await this.logger.flush?.();

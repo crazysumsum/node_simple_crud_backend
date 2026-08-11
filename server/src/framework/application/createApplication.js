@@ -414,7 +414,9 @@ export async function createApplication({
         config: configuration.request.limits,
         logger: activeLogger,
         time,
-        store: rateLimitStore
+        store: rateLimitStore,
+        // 協作者，不是工作接線：限流器自己決定要不要送出清理工作。
+        scheduler: activeScheduler
       });
 
     if (
