@@ -370,6 +370,28 @@ export function createApiDispatcher({
     registeredApis
   });
 
+  // 未認證請求的 idempotency scope 只能靠 client IP 區分。IP 一旦不可信——
+  // 部署在反向代理後面卻沒設 trustProxy 是最常見的情形——所有使用者會共用同一
+  // 個 scope：同一個 key 配上不同輸入互相撞成 409，配上完全相同的輸入則會拿到
+  // 別人的回應。這個組合本身沒有錯，但它對 IP 正確性的依賴應該在部署前就看得見。
+  const publicIdempotentApis = registeredApis
+    .filter(({ authType, idempotency }) => authType === "public" && idempotency.enabled)
+    .map(({ method, path }) => `${method} ${path}`);
+
+  if (publicIdempotentApis.length > 0) {
+    void activeLogger.warn(
+      "api.public_idempotency_registered",
+      "Unauthenticated routes use client IP as their idempotency scope",
+      {
+        apis: publicIdempotentApis,
+        impact:
+          "Every caller sharing a client IP shares one idempotency key namespace",
+        resolution:
+          "Confirm TRUST_PROXY matches the deployment so req.ip identifies the caller, or require authentication on these routes"
+      }
+    );
+  }
+
   router.use("/api", (req, res) => {
     void activeLogger.warn("api.not_registered", "Unregistered API request blocked", {
       requestId: req.requestId || null,

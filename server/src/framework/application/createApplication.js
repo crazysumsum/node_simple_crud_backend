@@ -23,7 +23,8 @@ import { sendError } from "../http/apiResponse.js";
 import { RequestLimiter } from "../middleware/requestLimiter.js";
 import {
   createCorsOptions,
-  createHttpsEnforcementMiddleware
+  createHttpsEnforcementMiddleware,
+  createProxyHeaderCheckMiddleware
 } from "../security/securityMiddleware.js";
 import { RequestValidator } from "../validation/requestValidator.js";
 import { ResponseValidator } from "../validation/responseValidator.js";
@@ -480,6 +481,9 @@ export async function createApplication({
     // 回應不會帶 Access-Control-Allow-Origin，瀏覽器只會看到沒有細節的
     // network error，前端無法讀取狀態碼或 Retry-After 做退避處理。
     app.use(cors(createCorsOptions(security)));
+    // 排在限流之前：限流本身就是這個設定錯誤的主要受害者，被擋下的請求也該
+    // 有機會觸發這個警告。
+    app.use(createProxyHeaderCheckMiddleware(security, activeLogger));
     app.use(createHttpsEnforcementMiddleware(security));
     app.use(activeRequestLimiter.middleware());
     app.use(
@@ -526,6 +530,7 @@ export async function createApplication({
           "requestContext",
           ...(security.helmetEnabled ? ["helmet"] : []),
           "cors",
+          "proxyHeaderCheck",
           "httpsEnforcement",
           "requestLimiter",
           "requestServiceScope",
