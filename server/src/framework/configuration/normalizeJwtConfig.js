@@ -1,3 +1,5 @@
+import { revealSecret, secretValue } from "./SecretValue.js";
+
 const SUPPORTED_ALGORITHMS = new Set(["HS256", "HS384", "HS512"]);
 
 function requiredText(value, key) {
@@ -13,13 +15,14 @@ function requiredText(value, key) {
 export function normalizeJwtConfig(source) {
   // 密鑰在每個環境都是必要的。舊版只在 NODE_ENV=production 時強制，而 NODE_ENV
   // 未設定時會落回 "development"，等於漏設環境變數就會靜默採用一組寫死的密鑰。
-  if (!String(source?.secret || "").trim()) {
+  const secret = revealSecret(source?.secret).trim();
+
+  if (!secret) {
     throw new Error(
       "JWT_SECRET is required. Set it to a random value of at least 32 characters."
     );
   }
 
-  const secret = requiredText(source.secret, "secret");
   const algorithm = requiredText(source?.algorithm, "algorithm");
   const clockToleranceSeconds = Number(source?.clockToleranceSeconds);
 
@@ -38,7 +41,8 @@ export function normalizeJwtConfig(source) {
   }
 
   return Object.freeze({
-    secret,
+    // 包起來之後，把整份設定寫進日誌或錯誤 context 只會得到 [REDACTED]。
+    secret: secretValue(secret, "JWT secret"),
     issuer: requiredText(source?.issuer, "issuer"),
     audience: requiredText(source?.audience, "audience"),
     algorithm,

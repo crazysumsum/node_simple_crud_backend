@@ -58,7 +58,7 @@ export class JwtService extends BaseService {
       options.subject = String(subject);
     }
 
-    return jwt.sign(payload, this.#jwt.secret, options);
+    return jwt.sign(payload, this.#jwt.secret.reveal(), options);
   }
 
   /**
@@ -66,7 +66,7 @@ export class JwtService extends BaseService {
    * JwtAuthStrategy 會把原因記進日誌，但只回傳籠統的 JWT_INVALID。
    */
   verify(token) {
-    return jwt.verify(token, this.#jwt.secret, {
+    return jwt.verify(token, this.#jwt.secret.reveal(), {
       algorithms: [this.#jwt.algorithm],
       issuer: this.#jwt.issuer,
       audience: this.#jwt.audience,
