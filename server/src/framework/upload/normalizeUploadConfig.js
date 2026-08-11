@@ -85,6 +85,11 @@ export function normalizeUploadConfig(
       "maxFieldCount",
       label
     ),
+    maxFieldSizeBytes: positiveInteger(
+      source.maxFieldSizeBytes ?? 65536,
+      "maxFieldSizeBytes",
+      label
+    ),
     allowedMimeTypes: Object.freeze(allowedMimeTypes),
     fileMode: permissionMode(source.fileMode, "fileMode", label, 0o600),
     directoryMode: permissionMode(

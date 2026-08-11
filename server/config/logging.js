@@ -23,6 +23,11 @@ const loggingConfig = {
       // 每個日誌檔案最大容量，單位為 bytes；超過前會建立同日流水號檔案。
       maxFileSizeBytes: 10485760,
 
+      // 等待寫入磁碟的日誌筆數上限。寫入是串行的，磁碟一慢就會堆積；
+      // 超過此上限的日誌會被丟棄，以免為了記錄故障而把記憶體吃光。
+      // 丟棄不是靜默的：下一筆成功寫入前會補上一筆 logging.entries_lost 統計。
+      maxQueuedEntries: 10000,
+
       // 日誌檔與目錄的權限。預設只有擁有者可讀寫，因為日誌會保留 30 天，
       // 且在錯誤或 route 明確 opt-in 時含有完整 request／response body。
       // 若有以其他帳號執行的 log shipper 需要讀取，可放寬為 0o640 並同群組。
@@ -80,6 +85,9 @@ const loggingConfig = {
 
       // 每個 system log 檔案最大容量，單位為 bytes。
       maxFileSizeBytes: 10485760,
+
+      // 等待寫入磁碟的日誌筆數上限，超過即丟棄並在恢復後補上統計。
+      maxQueuedEntries: 10000,
 
       // 日誌檔與目錄的權限。預設只有擁有者可讀寫，因為日誌會保留 30 天，
       // 且在錯誤或 route 明確 opt-in 時含有完整 request／response body。

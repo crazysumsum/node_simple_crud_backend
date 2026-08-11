@@ -108,6 +108,10 @@ export function normalizeLoggerConfig(source, name = "logger") {
       profile.maxFileSizeBytes ?? 10485760,
       `loggers.${name}.maxFileSizeBytes`
     ),
+    maxQueuedEntries: positiveNumber(
+      profile.maxQueuedEntries ?? 10000,
+      `loggers.${name}.maxQueuedEntries`
+    ),
     minimumLevel,
     bodyCapture: bodyCaptureMode(
       profile.bodyCapture,

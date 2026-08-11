@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
-import { chmod, mkdir, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import busboy from "busboy";
 import { ApplicationError } from "../errors/ApplicationError.js";
+import { cleanupUploadedFiles } from "./cleanupUploadedFiles.js";
 
 export class UploadError extends ApplicationError {
   constructor(code, message, statusCode = 400) {
@@ -76,7 +77,11 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
         limits: {
           fileSize: config.maxFileSizeBytes,
           files: config.maxFiles,
-          fields: config.maxFieldCount
+          fields: config.maxFieldCount,
+          // 沒有這一項時 busboy 會套用自己的 1MiB 預設值，於是 maxFieldCount
+          // 個文字欄位可以夾帶遠超過 maxFileSizeBytes 的資料進來——設定看起來
+          // 限制了請求大小，實際上沒有。
+          fieldSize: config.maxFieldSizeBytes
         }
       });
     } catch (error) {
@@ -98,7 +103,42 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
       failure = failure || error;
     };
 
-    parser.on("field", (name, value) => {
+    // 客戶端在 body 送完之前斷線時 busboy 永遠不會發出 close。少了這個收尾，
+    // dispatcher 包住上傳的 Promise 就不會 settle：並行槽位與 request scope
+    // 會一路卡到 request timeout，只要開一批半途中斷的連線就能佔滿服務。
+    const onRequestClose = () => {
+      if (settled || req.complete) {
+        return;
+      }
+
+      settled = true;
+      req.unpipe(parser);
+      parser.destroy();
+      next(
+        new UploadError(
+          "UPLOAD_ABORTED",
+          "Upload ended before the request body was fully received",
+          400
+        )
+      );
+    };
+
+    req.on("close", onRequestClose);
+
+    parser.on("field", (name, value, info) => {
+      // busboy 對超長欄位是靜默截斷，不會發出任何事件；不主動檢查的話
+      // handler 會拿到一個看起來正常、其實少了尾巴的值。
+      if (info?.nameTruncated || info?.valueTruncated) {
+        fail(
+          new UploadError(
+            "UPLOAD_FIELD_TOO_LARGE",
+            `Form field exceeds the ${config.maxFieldSizeBytes} byte limit`,
+            413
+          )
+        );
+        return;
+      }
+
       fields[name] = value;
     });
 
@@ -165,6 +205,9 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
               originalName: path.basename(String(filename || "")),
               mimeType: declared,
               size,
+              // 內容摘要在這裡算最便宜——buffer 還在手上。Idempotency 需要它
+              // 才能分辨「同一個 key 重送同一份檔案」與「換了一份檔案」。
+              contentHash: createHash("sha256").update(buffer).digest("hex"),
               buffer
             });
           },
@@ -195,6 +238,7 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
       }
 
       settled = true;
+      req.removeListener("close", onRequestClose);
 
       Promise.all(pending)
         .then(async () => {
@@ -215,7 +259,21 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
               const filePath = path.join(config.directory, storedName);
 
               await writeFile(filePath, file.buffer, { mode: config.fileMode });
-              await chmod(filePath, config.fileMode).catch(() => {});
+              // writeFile 的 mode 遇上 umask 或既有檔案不一定生效，所以再收一次。
+              // 收不緊代表上傳的檔案權限比宣告的寬，而附件往往就是最敏感的
+              // 資料——不能靜靜地放過去。
+              await chmod(filePath, config.fileMode).catch((error) => {
+                void logger?.error?.(
+                  "upload.file_mode_failed",
+                  "Stored upload could not be restricted to the configured mode",
+                  {
+                    requestId: req.requestId || null,
+                    storedName,
+                    requestedMode: config.fileMode.toString(8),
+                    error: { name: error.name, code: error.code ?? null, message: error.message }
+                  }
+                );
+              });
               stored.push(
                 Object.freeze({
                   field: file.field,
@@ -223,15 +281,16 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
                   storedName,
                   path: filePath,
                   mimeType: file.mimeType,
-                  size: file.size
+                  size: file.size,
+                  contentHash: file.contentHash
                 })
               );
             }
           } catch (error) {
-            // 部分寫入時清掉已落盤的檔案，不留孤兒。
-            await Promise.all(
-              stored.map(({ path: filePath }) => unlink(filePath).catch(() => {}))
-            );
+            // 部分寫入時清掉已落盤的檔案，不留孤兒。清不掉就是真的留了垃圾，
+            // 必須記下來——磁碟上多出來的檔案沒有別的線索可循。
+            req.files = stored;
+            await cleanupUploadedFiles(req, logger, "partial_write");
             throw error;
           }
 

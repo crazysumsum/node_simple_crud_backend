@@ -6,6 +6,7 @@ import { createHandlerRegistry } from "../api/handlerRegistry.js";
 import { createAuthStrategyRegistry } from "../auth/authStrategyRegistry.js";
 import { verifyAccessToken } from "../auth/jwtService.js";
 import { createAuthorizationPolicyRegistry } from "../authorization/authorizationPolicyRegistry.js";
+import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
 import {
   defaultConfigurationSource,
   validateApplicationConfiguration
@@ -179,7 +180,12 @@ class Application {
     const deadline = this.time.nowMs() + timeoutMs;
     const remainingTime = () => Math.max(1, deadline - this.time.nowMs());
     const forcedExit = setTimeout(() => {
-      console.error(`Graceful shutdown exceeded ${timeoutMs}ms`);
+      // 強制結束時 logger 可能已經在關閉流程中，非同步寫入不保證落得了盤，
+      // 所以走同步的 stderr——這是關機逾時唯一保證留得下的記錄。
+      reportInternalFailure("application.shutdown.forced", null, {
+        reason,
+        timeoutMs
+      });
       this.forceExit(1);
     }, timeoutMs);
 

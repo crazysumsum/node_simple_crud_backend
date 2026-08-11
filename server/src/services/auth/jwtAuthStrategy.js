@@ -41,7 +41,16 @@ export class JwtAuthStrategy extends BaseAuthStrategy {
     try {
       const claims = this.verifyToken(token);
       return { type: this.authType, claims };
-    } catch {
+    } catch (error) {
+      // 客戶端只會收到籠統的 JWT_INVALID——「簽章錯誤」與「已過期」的差別
+      // 會告訴攻擊者他離成功還差多遠。但這個差別對防守方極重要：過期是日常，
+      // 簽章錯誤代表有人在偽造 token。原因只寫進日誌，不進回應。
+      void this.logger?.warn?.("auth.jwt.rejected", "JWT verification failed", {
+        requestId: req.requestId || null,
+        // jsonwebtoken 用 name 區分 TokenExpiredError／JsonWebTokenError／
+        // NotBeforeError，message 則載明是 issuer、audience 還是簽章不符。
+        error: { name: error.name, message: error.message }
+      });
       throw new AuthenticationError("JWT_INVALID", "JWT is invalid or expired");
     }
   }
