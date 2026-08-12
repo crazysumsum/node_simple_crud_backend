@@ -43,6 +43,10 @@ log file dates use this IANA time zone through the injected `time` service.
    mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/jwt.sql
    ```
 
+   ```bash
+   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/idempotency.sql
+   ```
+
    `init.sql` must run first: it creates the database and the application user.
    The files under `database/framework/` create the framework's own tables, which
    are all named with an `fr_` prefix so that framework-owned tables are never
@@ -879,17 +883,34 @@ Set `static api.deprecation.deprecated=true` to emit `Deprecation`; optional
 
 ## Idempotency
 
-Framework idempotency is configured in `server/config/api.js` under `idempotency` and
-enabled per route with `static api.idempotency.enabled=true`. Such requests must
-provide `Idempotency-Key`.
+Framework idempotency is configured in `server/config/idempotency.js` and enabled per
+route with `static api.idempotency.enabled=true`. Such requests must provide
+`Idempotency-Key`.
 The key is scoped by caller identity and route, while a fingerprint also covers the
 validated input. A completed successful response is replayed with
 `Idempotency-Replayed: true`; key reuse with different input returns HTTP 409.
 
-The built-in `MemoryIdempotencyStore` is for one process. Multi-instance deployments
-must inject an atomic shared `IdempotencyStore` implementation through the Application
-Factory. Store entries have configurable TTLs and pending entries prevent concurrent
-duplicate work.
+`storeAdapter` defaults to `mysql`, which uses `fr_idempotency_keys` and takes the
+table's primary key as the mutex: the instance whose `INSERT` succeeds owns the key,
+everyone else is told the work is already in progress. `memory` is available for
+single-instance deployments and avoids a database round trip, but its state lives in
+one process, so behind a load balancer the same key reaching two instances executes
+twice.
+
+A pending record holds a lease rather than the full TTL. Without one, an instance that
+crashes mid-request would leave its key locked until the TTL expired; with one, the
+key frees itself. Because a lease that expires while the original request is still
+running would let a second instance start the same work, startup rejects any route
+whose `timeoutMs` is not shorter than `pendingLeaseMs`.
+
+Disabling the service is allowed, but any route still declaring idempotency then fails
+startup — losing the guarantee silently is worse than not booting. Responses larger
+than `maxResponseBytes` are not cached: the key is released and a retry re-executes.
+
+`idempotency.purge` reclaims expired rows every 15 minutes with cluster scope, deleting
+in batches of 1000 up to `purgeMaxBatches` per run. Expiry itself is decided per row on
+read, so a purge that falls behind costs table size, not correctness — and because that
+has no other symptom, hitting the batch limit logs `idempotency.purge_incomplete`.
 
 ## Request Validation
 

@@ -8,9 +8,7 @@ import {
   markRequestProcessingCompleted,
   markRequestProcessingStarted
 } from "../http/requestProcessingLifecycle.js";
-import { IdempotencyManager } from "../idempotency/IdempotencyManager.js";
-import { MemoryIdempotencyStore } from "../idempotency/IdempotencyStore.js";
-import { normalizeIdempotencyConfig } from "../idempotency/normalizeIdempotencyConfig.js";
+import { DISABLED_ROUTE_IDEMPOTENCY } from "../../services/idempotency/IdempotencyService.js";
 import { createRequestTimeoutMiddleware } from "./requestTimeout.js";
 import { cleanupUploadedFiles } from "../upload/cleanupUploadedFiles.js";
 import { createUploadMiddleware } from "../upload/uploadMiddleware.js";
@@ -61,7 +59,7 @@ export function validateApiConfig(
   defaultRequestTimeoutMs,
   authorizationPolicies = createAuthorizationPolicyRegistry(),
   versioning = normalizeApiVersioningConfig(apiConfig.versioning),
-  idempotencyManager
+  idempotency
 ) {
   if (!Array.isArray(routes)) {
     throw new TypeError("API config must export an array");
@@ -133,7 +131,15 @@ export function validateApiConfig(
       throw new Error(`idempotency config is required for ${routeKey}`);
     }
 
-    idempotencyManager?.routeOptions(route.idempotency, routeKey);
+    // 這條 route 要 idempotency，但整個 service 被停用了。靜默降級等於這條
+    // route 以為自己防著重複提交，實際上沒有——比啟動不了嚴重得多。
+    if (route.idempotency.enabled === true && !idempotency) {
+      throw new Error(
+        `${routeKey} declares idempotency, but the "idempotency" service is disabled by its static service.enabled flag. Enable it, or turn idempotency off on this route.`
+      );
+    }
+
+    idempotency?.routeOptions(route.idempotency, routeKey);
     normalizeRouteLogging(route.logging, routeKey);
 
     if (!(handlers[route.handler] instanceof BaseRequestHandler)) {
@@ -144,6 +150,19 @@ export function validateApiConfig(
 
     if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
       throw new Error(`Request timeout must be a positive integer for ${routeKey}`);
+    }
+
+    // 共享 store 靠租約在實例崩潰後解鎖那一列。租約若短於這條 route 可能的
+    // 執行時間，原請求還在跑就會有別的實例接手同一件工作——idempotency 反過來
+    // 造成重複執行。這是唯一能在啟動時擋下它的地方，因為只有這裡同時看得到
+    // 每條 route 的 timeoutMs 與 service 的租約長度。
+    if (
+      route.idempotency.enabled === true &&
+      timeoutMs >= idempotency.pendingLeaseMs
+    ) {
+      throw new Error(
+        `${routeKey} has timeoutMs ${timeoutMs}, which is not shorter than idempotency.pendingLeaseMs (${idempotency.pendingLeaseMs}). A request could outlive its idempotency lease and be executed twice. Raise pendingLeaseMs, or lower this route's timeout.`
+      );
     }
 
     if (configuredRoutes.has(routeKey)) {
@@ -162,7 +181,7 @@ export function createApiDispatcher({
   responseValidator,
   authorizationPolicies,
   versioning,
-  idempotencyManager,
+  idempotency,
   context,
   logger,
   time,
@@ -202,15 +221,6 @@ export function createApiDispatcher({
     throw new TypeError("API dispatcher requires a time service");
   }
 
-  const activeIdempotencyManager =
-    idempotencyManager ||
-    new IdempotencyManager({
-      config: normalizeIdempotencyConfig(apiConfig.idempotency),
-      store: new MemoryIdempotencyStore(),
-      logger: activeLogger,
-      context
-    });
-
   validateApiConfig(
     routes,
     handlers,
@@ -218,7 +228,7 @@ export function createApiDispatcher({
     defaultRequestTimeoutMs,
     activeAuthorizationPolicies,
     activeVersioning,
-    activeIdempotencyManager
+    idempotency
   );
 
   const router = Router();
@@ -234,10 +244,9 @@ export function createApiDispatcher({
       route.authorizationPolicies,
       routeKey
     );
-    const idempotency = activeIdempotencyManager.routeOptions(
-      route.idempotency,
-      routeKey
-    );
+    const routeIdempotency =
+      idempotency?.routeOptions(route.idempotency, routeKey) ??
+      DISABLED_ROUTE_IDEMPOTENCY;
     const logging = normalizeRouteLogging(route.logging, routeKey);
     const upload = route.upload
       ? normalizeUploadConfig(route.upload, `upload config for ${routeKey}`, fileTypes)
@@ -263,7 +272,7 @@ export function createApiDispatcher({
       handler: route.handler,
       version: lifecycle.version,
       deprecation: lifecycle,
-      idempotency,
+      idempotency: routeIdempotency,
       logging,
       upload: upload?.enabled
         ? Object.freeze({
@@ -329,12 +338,15 @@ export function createApiDispatcher({
           }
 
           validateRequest(req);
-          await activeIdempotencyManager.execute(
-            req,
-            res,
-            idempotency,
-            () => handler.handle(req, res, next)
-          );
+          // service 缺席時 routeIdempotency.enabled 必為 false——宣告了
+          // idempotency 的 route 在 validateApiConfig 就已經擋下啟動。
+          if (routeIdempotency.enabled) {
+            await idempotency.execute(req, res, routeIdempotency, () =>
+              handler.handle(req, res, next)
+            );
+          } else {
+            await handler.handle(req, res, next);
+          }
 
           // 重播回傳的是上一次的回應，handler 根本沒有執行，所以這次帶上來的
           // 檔案不會被任何東西引用。

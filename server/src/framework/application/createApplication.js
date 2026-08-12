@@ -10,8 +10,6 @@ import {
   defaultConfigurationSource,
   validateApplicationConfiguration
 } from "../configuration/applicationConfiguration.js";
-import { IdempotencyManager } from "../idempotency/IdempotencyManager.js";
-import { MemoryIdempotencyStore } from "../idempotency/IdempotencyStore.js";
 import { createServiceContainer } from "../services/createServiceContainer.js";
 import { createRequestServiceScopeMiddleware } from "../services/requestServiceScope.js";
 import {
@@ -31,9 +29,9 @@ import { ResponseValidator } from "../validation/responseValidator.js";
 /**
  * 執行一個關閉動作，並在逾時後放棄等待。
  *
- * 關閉流程的三種資源（HTTP server、限流器、idempotency store）先前各自複製了
- * 同一段 promise 骨架：只結算一次、清掉計時器、成功回 true、失敗或逾時回 false。
- * 差異只在「怎麼關」與「逾時要不要額外動作」，所以那兩點交給呼叫端。
+ * 限流器與 idempotency 的 store 都已經是 service，由容器負責關閉，所以現在
+ * 只剩 HTTP server 走這條路。骨架仍然留著：只結算一次、清掉計時器、成功回
+ * true、失敗或逾時回 false，差異只在「怎麼關」與「逾時要不要額外動作」。
  *
  * close 收到 finish(closedGracefully)，可同步或非同步呼叫；重複呼叫會被忽略。
  */
@@ -77,22 +75,6 @@ function closeHttpServer(server, timeoutMs) {
   );
 }
 
-/** 任何提供 close() 的資源，例如限流 store 與 idempotency store。 */
-function closeResource(resource, timeoutMs) {
-  if (!resource?.close) {
-    return Promise.resolve(true);
-  }
-
-  return closeWithTimeout(
-    (finish) =>
-      Promise.resolve(resource.close()).then(
-        () => finish(true),
-        () => finish(false)
-      ),
-    timeoutMs
-  );
-}
-
 class Application {
   constructor({
     app,
@@ -103,7 +85,7 @@ class Application {
     requestLogger,
     requestLimiter,
     authStrategies,
-    idempotencyManager,
+    idempotency,
     scheduler,
     time,
     forceExit
@@ -116,7 +98,7 @@ class Application {
     this.requestLogger = requestLogger;
     this.requestLimiter = requestLimiter;
     this.authStrategies = authStrategies;
-    this.idempotencyManager = idempotencyManager;
+    this.idempotency = idempotency;
     this.scheduler = scheduler;
     this.time = time;
     this.forceExit = forceExit;
@@ -223,12 +205,8 @@ class Application {
         httpServerClosedPromise,
         schedulerStoppedPromise
       ]);
-    // 限流 store 的關閉現在就是一次 service 關閉，由容器負責，失敗會出現在
-    // serviceFailures 裡。不再需要一個專屬的回報欄位。
-    const idempotencyStoreClosed = await closeResource(
-      this.idempotencyManager,
-      remainingTime()
-    );
+    // 限流器與 idempotency 的 store 都由容器關閉，失敗會出現在 serviceFailures
+    // 裡。不再需要專屬的回報欄位。
     const serviceShutdown = await this.services.shutdown({
       exclude: ["logging"],
       timeoutMs: remainingTime()
@@ -245,7 +223,6 @@ class Application {
         activeRequestsDrained,
         httpServerClosed,
         schedulerDrained,
-        idempotencyStoreClosed,
         servicesClosed: serviceShutdown.closed,
         serviceFailures: serviceShutdown.failures.map(({ name }) => name)
       }
@@ -262,7 +239,6 @@ class Application {
       !activeRequestsDrained ||
       !httpServerClosed ||
       !schedulerDrained ||
-      !idempotencyStoreClosed ||
       !serviceShutdown.closed ||
       !loggingShutdown.closed
         ? 1
@@ -275,7 +251,6 @@ class Application {
       activeRequestsDrained,
       httpServerClosed,
       schedulerDrained,
-      idempotencyStoreClosed,
       servicesClosed: serviceShutdown.closed && loggingShutdown.closed
     });
   }
@@ -319,8 +294,6 @@ export async function createApplication({
   logger,
   loggerRegistry,
   requestLogger,
-  idempotencyManager,
-  idempotencyStore,
   serviceDiscoveryOptions,
   serviceOverrides,
   serviceFactories,
@@ -369,6 +342,9 @@ export async function createApplication({
   // 限流器與排程器同一類：框架安排它的生命週期先後，但不要求它存在。用 get()
   // 而非 require()，停用限流器的部署不該因此無法啟動。eager 保證它已經建好。
   const activeRequestLimiter = services.get("requestLimiter") ?? null;
+  // idempotency 同理。停用它本身不會擋住啟動，但任何仍宣告 idempotency 的
+  // route 會在 validateApiConfig 讓啟動失敗。
+  const activeIdempotency = services.get("idempotency") ?? null;
   let activeStrategies = strategies;
 
   try {
@@ -404,28 +380,6 @@ export async function createApplication({
       );
     }
 
-    if (
-      !idempotencyManager &&
-      !idempotencyStore &&
-      configuration.api.idempotency.storeAdapter !== "memory"
-    ) {
-      throw new Error(
-        `IdempotencyStore adapter must be injected for ${configuration.api.idempotency.storeAdapter}`
-      );
-    }
-
-    const activeIdempotencyManager =
-      idempotencyManager ||
-      new IdempotencyManager({
-        config: configuration.api.idempotency,
-        store:
-          idempotencyStore ||
-          new MemoryIdempotencyStore({
-            maxEntries: configuration.api.idempotency.memoryMaxEntries
-        }),
-        logger: activeLogger,
-        context
-      });
     // 策略是一般的 service，已經由 container 建立完成；這裡只是依 authType
     // 建立索引，不再掃描目錄，也不接管它們的生命週期。
     activeStrategies =
@@ -451,7 +405,7 @@ export async function createApplication({
       configuration.application.requestTimeoutMs,
       activeAuthorizationPolicies,
       configuration.api.versioning,
-      activeIdempotencyManager
+      activeIdempotency
     );
 
     const apiDispatcher = createApiDispatcher({
@@ -460,7 +414,7 @@ export async function createApplication({
       strategies: activeStrategies,
       authorizationPolicies: activeAuthorizationPolicies,
       versioning: configuration.api.versioning,
-      idempotencyManager: activeIdempotencyManager,
+      idempotency: activeIdempotency,
       validator: activeValidator,
       responseValidator: activeResponseValidator,
       context,
@@ -559,7 +513,7 @@ export async function createApplication({
         authorizationPolicies: activeAuthorizationPolicies.names(),
         handlers: Object.keys(activeHandlers),
         loggers: activeLoggerRegistry.names(),
-        idempotencyStoreAdapter: configuration.api.idempotency.storeAdapter
+        idempotencyStoreAdapter: activeIdempotency?.config.storeAdapter ?? null
       }
     );
 
@@ -572,7 +526,7 @@ export async function createApplication({
       requestLogger: activeRequestLogger,
       requestLimiter: activeRequestLimiter,
       authStrategies: activeStrategies,
-      idempotencyManager: activeIdempotencyManager,
+      idempotency: activeIdempotency,
       scheduler: activeScheduler,
       time,
       forceExit

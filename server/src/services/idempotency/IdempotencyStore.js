@@ -11,6 +11,19 @@ export class IdempotencyStore {
 
   async fail(_key) {}
 
+  /**
+   * 主動刪除已過期的紀錄，由 IdempotencyPurgeJob 定時呼叫。
+   *
+   * 記憶體 adapter 靠自己的掃描回收，共享 adapter 則需要有人來收——沒有人來
+   * 收的話，表的大小只會單調成長。
+   *
+   * 回傳 removed（刪除筆數）與 exhausted（是否因為撞到單輪上限才停手，而不是
+   * 因為刪完了）。後者是「清理追不上」唯一的訊號。
+   */
+  async purge() {
+    return { removed: 0, exhausted: false };
+  }
+
   async close() {}
 }
 
@@ -55,7 +68,7 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
     return entry;
   }
 
-  async begin(key, { fingerprint, ttlMs }) {
+  async begin(key, { fingerprint, ttlMs, pendingLeaseMs = ttlMs }) {
     this.cleanup();
     const existing = this.liveEntry(key);
 
@@ -73,7 +86,10 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
       this.entries.set(key, {
         state: "pending",
         fingerprint,
-        expiresAt: this.now() + ttlMs,
+        // 處理中的紀錄用租約，不用完整的 TTL：一個掛住的請求不該把 key 鎖到
+        // 重播窗口結束。共享 adapter 靠同一個租約在實例崩潰後解鎖，兩邊的語意
+        // 因此一致。
+        expiresAt: this.now() + pendingLeaseMs,
         response: null
       });
       return { state: "started" };

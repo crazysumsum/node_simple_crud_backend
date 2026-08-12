@@ -175,6 +175,12 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: []
     },
     {
+      // 共享 store 需要注入 mysqldatabase——那正是它必須是 service 的原因。
+      name: "idempotency",
+      lifecycle: "singleton",
+      dependencies: ["mysqldatabase", "logging", "context", "time"]
+    },
+    {
       name: "logging",
       lifecycle: "singleton",
       dependencies: ["time"]
@@ -195,6 +201,13 @@ test("service discovery finds the built-in public services", async () => {
       name: "scheduler",
       lifecycle: "singleton",
       dependencies: ["logging", "time", "mysqldatabase"]
+    },
+    {
+      // cluster scope：idempotency 表是所有實例共用的，每台都掃一次只是重複
+      // 同一個 DELETE。
+      name: "job.idempotencyPurge",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "idempotency"]
     },
     {
       // jobs/ 就在 src/services/ 底下，所以定時工作被同一套自發現載入，

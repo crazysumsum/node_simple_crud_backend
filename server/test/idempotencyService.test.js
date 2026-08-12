@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   IdempotencyError,
-  IdempotencyManager
-} from "../src/framework/idempotency/IdempotencyManager.js";
-import { normalizeIdempotencyConfig } from "../src/framework/idempotency/normalizeIdempotencyConfig.js";
+  IdempotencyService
+} from "../src/services/idempotency/IdempotencyService.js";
+import { normalizeIdempotencyConfig } from "../src/services/idempotency/normalizeIdempotencyConfig.js";
 
 // 這裡測兩件事：key 對應到誰（錯了就是跨使用者外洩），以及 store 降級時客戶端
 // 收到什麼（每一種都是實際會回到線上的回應）。
 
 const baseConfig = {
-  enabled: true,
   headerName: "Idempotency-Key",
   maxKeyLength: 128,
   defaultTtlMs: 60000,
@@ -46,7 +45,7 @@ function recordingStore(behaviour = {}) {
 function createManager(store, { config: overrides, logger = collectingLogger() } = {}) {
   return {
     logger,
-    manager: new IdempotencyManager({
+    manager: new IdempotencyService({
       config: normalizeIdempotencyConfig({ ...baseConfig, ...overrides }),
       store,
       logger,
@@ -377,23 +376,24 @@ test("route options reject a non-positive ttl", () => {
     );
   }
 
-  // 全域關閉時，route 自己啟用也不算數。
-  const disabled = createManager(recordingStore(), {
-    config: { enabled: false }
-  }).manager;
-  assert.equal(disabled.routeOptions({ enabled: true }, "post /x").enabled, false);
+  // 全域開關已經移到 static service.enabled，設定檔裡殘留的 enabled 會被擋下，
+  // 不會被當成「關掉了」而靜默生效。
+  assert.throws(
+    () => normalizeIdempotencyConfig({ ...baseConfig, enabled: false }),
+    /"enabled" was removed/
+  );
 });
 
 test("the manager requires a request context and a usable store", () => {
   const config = normalizeIdempotencyConfig(baseConfig);
 
   assert.throws(
-    () => new IdempotencyManager({ config, store: recordingStore(), logger: collectingLogger() }),
+    () => new IdempotencyService({ config, store: recordingStore(), logger: collectingLogger() }),
     /requires a request context service/
   );
   assert.throws(
     () =>
-      new IdempotencyManager({
+      new IdempotencyService({
         config,
         store: { begin: async () => ({ state: "started" }) },
         logger: collectingLogger(),
@@ -403,7 +403,7 @@ test("the manager requires a request context and a usable store", () => {
   );
 });
 
-test("closing the manager closes its store", async () => {
+test("the container's shutdown closes the store", async () => {
   let closed = 0;
   const store = recordingStore();
   store.close = async () => {
@@ -411,6 +411,9 @@ test("closing the manager closes its store", async () => {
   };
   const { manager } = createManager(store);
 
-  await manager.close();
+  // 容器只呼叫 shutdown||close 其中一個。這個 service 現在由容器持有，所以
+  // 名字必須是容器認得的那個，否則 store 永遠關不掉。
+  assert.equal(typeof manager.shutdown, "function");
+  await (manager.shutdown || manager.close).call(manager);
   assert.equal(closed, 1);
 });

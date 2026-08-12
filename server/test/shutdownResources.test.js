@@ -4,14 +4,14 @@ import { createApplication } from "../src/framework/application/createApplicatio
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
 import { MemoryRateLimitStore } from "../src/services/requestLimiter/RateLimitStore.js";
 import { fakeMySqlPool } from "../test-support/fakeMySqlPool.js";
-import { MemoryIdempotencyStore } from "../src/framework/idempotency/IdempotencyStore.js";
+import { MemoryIdempotencyStore } from "../src/services/idempotency/IdempotencyStore.js";
 
 // 關閉流程的逾時與失敗分支先前完全沒有測試，而它們正是 closeWithTimeout 的
 // 存在理由：任何一個資源關不掉都不能讓程序永遠掛著，且必須反映在 exitCode。
 //
-// 限流 store 現在由容器關閉（限流器是一個 service），所以它的失敗出現在
-// serviceFailures 裡而不是一個專屬欄位——idempotency store 仍走 Factory 自己的
-// closeResource，兩條路都要測到。
+// 限流器與 idempotency 現在都是 service，兩者的 store 都由容器關閉，所以失敗
+// 出現在 serviceFailures 裡而不是各自的專屬欄位。剩下走 Factory 自己那條路的
+// 只有 HTTP server。
 
 const silentLogger = {
   debug: async () => {},
@@ -34,10 +34,10 @@ async function startApplication(
     },
     logger: silentLogger,
     requestLogger: (_req, _res, next) => next(),
-    idempotencyStore,
     serviceOptions: {
       mysqldatabase: { pool: fakeMySqlPool({ end: poolEnd }) },
-      requestLimiter: { store: rateLimitStore }
+      requestLimiter: { store: rateLimitStore },
+      idempotency: { store: idempotencyStore }
     },
     // 逾時情境下框架會呼叫 forceExit，記錄而不是真的結束測試程序。
     forceExit: (code) => forcedExits.push(code)
@@ -61,8 +61,7 @@ test("shutdown reports a store that fails to close and fails the exit code", asy
   const { application } = await startApplication(t, { rateLimitStore, idempotencyStore });
   const result = await application.shutdown("test_complete");
 
-  assert.equal(result.idempotencyStoreClosed, false);
-  // 限流 store 關不掉會被記成 requestLimiter 這個 service 關閉失敗。
+  // 兩個 store 關不掉都會被記成各自 service 的關閉失敗。
   assert.equal(result.servicesClosed, false);
   // 其他資源仍然正常關閉，失敗不會中斷剩餘流程。
   assert.equal(result.httpServerClosed, true);
@@ -158,7 +157,6 @@ test("shutdown closes cleanly when every resource cooperates", async (t) => {
   });
   const result = await application.shutdown("test_complete");
 
-  assert.equal(result.idempotencyStoreClosed, true);
   assert.equal(result.httpServerClosed, true);
   assert.equal(result.servicesClosed, true);
   assert.equal(result.exitCode, 0);

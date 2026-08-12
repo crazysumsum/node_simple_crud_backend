@@ -1,0 +1,490 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { MySqlIdempotencyStore } from "../src/services/idempotency/MySqlIdempotencyStore.js";
+import { createTestTime } from "../test-support/createTestTime.js";
+
+// 這個 adapter 的存在理由只有一個：多實例部署下同一個 key 只能執行一次。互斥
+// 靠主鍵，所以假資料庫必須真的模擬主鍵衝突，否則測試會通過而叢集會重複執行。
+
+const OPTIONS = { fingerprint: "fp-1", ttlMs: 60000, pendingLeaseMs: 5000 };
+
+function duplicateKeyError() {
+  return Object.assign(new Error("MySQL database execute failed"), {
+    cause: Object.assign(new Error("Duplicate entry"), { code: "ER_DUP_ENTRY" })
+  });
+}
+
+/**
+ * 一張以 Map 模擬的表，含主鍵約束與 expires_at 語意。
+ * dbNowSeconds 可控，才測得出租約與 TTL 的邊界。
+ *
+ * 每個 WHERE 條件只在 SQL 真的帶了它的時候才生效。這一點很重要：假資料庫若
+ * 自己替生產程式碼把關（不管送來的 SQL 長怎樣都套用過期與 pending 判斷），
+ * 那麼刪掉那些條件測試照樣全綠——突變測試就是這樣抓到第一版的。
+ */
+function fakeDatabase({ dbNowSeconds = 1000 } = {}) {
+  const rows = new Map();
+  const state = { dbNowSeconds, statements: [] };
+  const live = (row) => row && row.expires_at > state.dbNowSeconds;
+
+  const run = async (sql, params = []) => {
+    const text = sql.replace(/\s+/g, " ").trim();
+    state.statements.push(text);
+
+    if (text.startsWith("INSERT INTO fr_idempotency_keys")) {
+      const [store_key, fingerprint, leaseSeconds] = params;
+
+      // 主鍵約束：已存在就衝突，不管過期沒有——過期的列仍然佔著主鍵。
+      if (rows.has(store_key)) {
+        throw duplicateKeyError();
+      }
+
+      rows.set(store_key, {
+        store_key,
+        fingerprint,
+        state: "pending",
+        status_code: null,
+        response: null,
+        expires_at: state.dbNowSeconds + leaseSeconds
+      });
+      return [{ affectedRows: 1 }];
+    }
+
+    if (text.startsWith("SELECT fingerprint")) {
+      const row = rows.get(params[0]);
+      const filtersExpired = text.includes("expires_at > UNIX_TIMESTAMP()");
+
+      if (!row || (filtersExpired && !live(row))) {
+        return [[]];
+      }
+
+      return [[{ ...row }]];
+    }
+
+    if (text.startsWith("DELETE FROM fr_idempotency_keys WHERE store_key = ? AND expires_at")) {
+      const row = rows.get(params[0]);
+
+      if (row && !live(row)) {
+        rows.delete(params[0]);
+        return [{ affectedRows: 1 }];
+      }
+
+      return [{ affectedRows: 0 }];
+    }
+
+    if (
+      text.startsWith("DELETE FROM fr_idempotency_keys WHERE store_key = ?") &&
+      !text.includes("expires_at")
+    ) {
+      const row = rows.get(params[0]);
+      const guardsPending = text.includes("state = 'pending'");
+
+      if (row && (!guardsPending || row.state === "pending")) {
+        rows.delete(params[0]);
+        return [{ affectedRows: 1 }];
+      }
+
+      return [{ affectedRows: 0 }];
+    }
+
+    if (text.startsWith("UPDATE fr_idempotency_keys")) {
+      const [status_code, response, ttlSeconds, store_key] = params;
+      const row = rows.get(store_key);
+      const guardsPending = text.includes("state = 'pending'");
+
+      if (!row || (guardsPending && row.state !== "pending")) {
+        return [{ affectedRows: 0 }];
+      }
+
+      Object.assign(row, {
+        state: "completed",
+        status_code,
+        response,
+        expires_at: state.dbNowSeconds + ttlSeconds
+      });
+      return [{ affectedRows: 1 }];
+    }
+
+    if (text.startsWith("DELETE FROM fr_idempotency_keys WHERE expires_at")) {
+      // LIMIT 是內插的常數而不是佔位符——真 MySQL 的 binary protocol 不接受
+      // `LIMIT ?`，而先前的假資料庫照單全收，所以這個限制只有實機才發現得了。
+      const limit = Number(text.match(/LIMIT (\d+)$/)[1]);
+      let affected = 0;
+
+      for (const [key, row] of rows) {
+        if (affected >= limit) {
+          break;
+        }
+
+        if (row.expires_at <= state.dbNowSeconds) {
+          rows.delete(key);
+          affected += 1;
+        }
+      }
+
+      return [{ affectedRows: affected }];
+    }
+
+    throw new Error(`Unexpected SQL: ${text}`);
+  };
+
+  return { rows, state, query: run, execute: run };
+}
+
+function createStore(overrides = {}) {
+  const database = fakeDatabase(overrides.database);
+  const store = new MySqlIdempotencyStore({
+    database,
+    time: createTestTime(),
+    maxResponseBytes: overrides.maxResponseBytes ?? 1048576,
+    purgeMaxBatches: overrides.purgeMaxBatches ?? 50
+  });
+
+  return { store, database };
+}
+
+// --- 互斥 --------------------------------------------------------------------
+
+test("only one caller wins the same key, the other sees it in progress", async () => {
+  const { store } = createStore();
+
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "started" });
+  // 第二個實例：INSERT 撞主鍵，讀到 pending。
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "inProgress" });
+});
+
+test("two concurrent begins on one key produce exactly one winner", async () => {
+  const { store } = createStore();
+
+  const results = await Promise.all([
+    store.begin("k", OPTIONS),
+    store.begin("k", OPTIONS),
+    store.begin("k", OPTIONS)
+  ]);
+
+  // 這是整個 adapter 的存在理由。多於一個 started 就代表叢集會重複執行。
+  assert.equal(results.filter(({ state }) => state === "started").length, 1);
+  assert.equal(results.filter(({ state }) => state === "inProgress").length, 2);
+});
+
+test("a different fingerprint on the same key is a conflict", async () => {
+  const { store } = createStore();
+
+  await store.begin("k", OPTIONS);
+  assert.deepEqual(await store.begin("k", { ...OPTIONS, fingerprint: "fp-2" }), {
+    state: "conflict"
+  });
+});
+
+// --- 重播 --------------------------------------------------------------------
+
+test("a completed key replays its stored response", async () => {
+  const { store } = createStore();
+
+  await store.begin("k", OPTIONS);
+  await store.complete("k", { statusCode: 201, body: { id: 7 } }, { ttlMs: 60000 });
+
+  assert.deepEqual(await store.begin("k", OPTIONS), {
+    state: "replay",
+    response: { statusCode: 201, body: { id: 7 } }
+  });
+});
+
+test("completing after losing the lease does not overwrite the new owner", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", OPTIONS);
+  // 租約到期，另一個實例接手並完成。
+  database.state.dbNowSeconds += 10;
+  await store.begin("k", OPTIONS);
+  await store.complete("k", { statusCode: 201, body: { owner: "second" } }, { ttlMs: 60000 });
+
+  // 原持有者這時才回來寫入。state='pending' 的條件讓它影響 0 列。
+  await store.complete("k", { statusCode: 201, body: { owner: "first" } }, { ttlMs: 60000 });
+
+  assert.deepEqual(await store.begin("k", OPTIONS), {
+    state: "replay",
+    response: { statusCode: 201, body: { owner: "second" } }
+  });
+});
+
+// --- 租約與過期 --------------------------------------------------------------
+
+test("an expired pending lease releases the key to the next caller", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", OPTIONS);
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "inProgress" });
+
+  // 實例崩潰了：列不會隨程序消失，租約是它唯一的解鎖方式。沒有這一段，
+  // 一次崩潰會讓這個 key 卡在 409 直到完整的 TTL 到期。
+  database.state.dbNowSeconds += 10;
+
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "started" });
+});
+
+test("an expired completed record is not replayed", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", OPTIONS);
+  await store.complete("k", { statusCode: 201, body: { id: 1 } }, { ttlMs: 60000 });
+
+  database.state.dbNowSeconds += 61;
+
+  // TTL 是「回放能持續多久」的承諾。過期後必須重新執行。
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "started" });
+});
+
+test("the pending lease is used for begin, and the full ttl only after completion", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", { fingerprint: "fp-1", ttlMs: 600000, pendingLeaseMs: 5000 });
+  assert.equal(database.rows.get("k").expires_at, database.state.dbNowSeconds + 5);
+
+  await store.complete("k", { statusCode: 200, body: {} }, { ttlMs: 600000 });
+  assert.equal(database.rows.get("k").expires_at, database.state.dbNowSeconds + 600);
+});
+
+// --- 釋放 --------------------------------------------------------------------
+
+test("failing a key releases it, but never deletes a completed record", async () => {
+  const { store } = createStore();
+
+  await store.begin("k", OPTIONS);
+  await store.fail("k");
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "started" });
+
+  await store.complete("k", { statusCode: 200, body: { id: 1 } }, { ttlMs: 60000 });
+  // 一次晚到的釋放不能把一個還能重播的回應刪掉。
+  await store.fail("k");
+  assert.deepEqual(await store.begin("k", OPTIONS), {
+    state: "replay",
+    response: { statusCode: 200, body: { id: 1 } }
+  });
+});
+
+// --- 回應體積 ----------------------------------------------------------------
+
+test("an oversized response releases the key instead of being cached", async () => {
+  const { store, database } = createStore({ maxResponseBytes: 64 });
+
+  await store.begin("k", OPTIONS);
+  await assert.rejects(
+    () =>
+      store.complete("k", { statusCode: 200, body: { blob: "x".repeat(500) } }, { ttlMs: 60000 }),
+    /over the 64 byte limit/
+  );
+
+  // 留在 pending 的話，重試會一路 409 到租約到期。釋放掉，重試重新執行。
+  assert.equal(database.rows.has("k"), false);
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "started" });
+});
+
+// --- 清理 --------------------------------------------------------------------
+
+test("purge deletes only expired rows and reports the count", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("stale", OPTIONS);
+  await store.complete("stale", { statusCode: 200, body: {} }, { ttlMs: 1000 });
+  database.state.dbNowSeconds += 2000;
+  await store.begin("fresh", OPTIONS);
+
+  assert.deepEqual(await store.purge(), { removed: 1, exhausted: false });
+  assert.deepEqual([...database.rows.keys()], ["fresh"]);
+});
+
+test("purge deletes in batches so one run cannot lock the table for long", async () => {
+  const { store, database } = createStore();
+
+  for (let index = 0; index < 5; index += 1) {
+    await store.begin(`k${index}`, OPTIONS);
+  }
+
+  database.state.dbNowSeconds += 10;
+  await store.purge();
+
+  const deletes = database.state.statements.filter((sql) =>
+    sql.startsWith("DELETE FROM fr_idempotency_keys WHERE expires_at")
+  );
+  assert.equal(deletes.length, 1);
+  assert.match(deletes[0], /LIMIT \d+$/);
+});
+
+// --- 契約 --------------------------------------------------------------------
+
+test("the store refuses to build without a database or a time service", () => {
+  assert.throws(
+    () => new MySqlIdempotencyStore({ time: createTestTime() }),
+    /requires the mysqldatabase service/
+  );
+  assert.throws(
+    () => new MySqlIdempotencyStore({ database: fakeDatabase() }),
+    /requires a time service/
+  );
+});
+
+test("a missing table says which SQL file creates it", async () => {
+  const database = fakeDatabase();
+  database.execute = async () => {
+    throw Object.assign(new Error("MySQL database execute failed"), {
+      cause: Object.assign(new Error("no such table"), { code: "ER_NO_SUCH_TABLE" })
+    });
+  };
+  const store = new MySqlIdempotencyStore({ database, time: createTestTime() });
+
+  await assert.rejects(
+    () => store.begin("k", OPTIONS),
+    /Table "fr_idempotency_keys" does not exist\. Run server\/database\/framework\/idempotency\.sql/
+  );
+});
+
+// --- 搶輸的那條路 --------------------------------------------------------------
+
+/**
+ * 依腳本回答的資料庫：用來重現「刪掉過期列之後、重試 INSERT 之前，被對手插隊」
+ * 這個只有幾微秒的窗口。真實併發測不出它，但它決定了那一刻回什麼。
+ */
+function scriptedDatabase({ inserts, selects }) {
+  const remainingInserts = [...inserts];
+  const remainingSelects = [...selects];
+
+  const run = async (sql) => {
+    const text = sql.replace(/\s+/g, " ").trim();
+
+    if (text.startsWith("INSERT")) {
+      if (remainingInserts.shift() === "duplicate") {
+        throw duplicateKeyError();
+      }
+
+      return [{ affectedRows: 1 }];
+    }
+
+    if (text.startsWith("SELECT")) {
+      const row = remainingSelects.shift();
+      return [row ? [row] : []];
+    }
+
+    return [{ affectedRows: 1 }];
+  };
+
+  return { query: run, execute: run };
+}
+
+test("losing the race after clearing an expired row answers inProgress", async () => {
+  const store = new MySqlIdempotencyStore({
+    // 兩次 INSERT 都撞主鍵，兩次 SELECT 都讀不到有效列：對手在這幾微秒之間
+    // 搶走了 key 並且已經結束。假設自己贏了會重複執行，所以保守回 inProgress。
+    database: scriptedDatabase({
+      inserts: ["duplicate", "duplicate"],
+      selects: [null, null]
+    }),
+    time: createTestTime()
+  });
+
+  assert.deepEqual(await store.begin("k", OPTIONS), { state: "inProgress" });
+});
+
+test("losing the race to a visible winner classifies against that winner", async () => {
+  const store = new MySqlIdempotencyStore({
+    database: scriptedDatabase({
+      inserts: ["duplicate", "duplicate"],
+      selects: [
+        null,
+        { fingerprint: "fp-1", state: "completed", status_code: 200, response: '{"id":9}' }
+      ]
+    }),
+    time: createTestTime()
+  });
+
+  assert.deepEqual(await store.begin("k", OPTIONS), {
+    state: "replay",
+    response: { statusCode: 200, body: { id: 9 } }
+  });
+});
+
+test("a completed record with no body replays without one", async () => {
+  const store = new MySqlIdempotencyStore({
+    database: scriptedDatabase({
+      inserts: ["duplicate"],
+      selects: [{ fingerprint: "fp-1", state: "completed", status_code: 204, response: null }]
+    }),
+    time: createTestTime()
+  });
+
+  // 204 沒有 body；JSON.parse(null) 會炸，所以這條路必須分開處理。
+  assert.deepEqual(await store.begin("k", OPTIONS), {
+    state: "replay",
+    response: { statusCode: 204, body: undefined }
+  });
+});
+
+test("purge stops at the configured batch limit and says it is behind", async () => {
+  // 每批 1000 列，上限 2 批：造 2500 列過期資料，一輪只清得掉 2000。
+  const rows = new Map();
+  const state = { dbNowSeconds: 1000 };
+
+  for (let index = 0; index < 2500; index += 1) {
+    rows.set(`k${index}`, { expires_at: 0 });
+  }
+
+  const database = {
+    query: async () => [[]],
+    execute: async (sql) => {
+      const limit = Number(sql.match(/LIMIT (\d+)$/)[1]);
+      let affected = 0;
+
+      for (const [key, row] of rows) {
+        if (affected >= limit) {
+          break;
+        }
+
+        if (row.expires_at <= state.dbNowSeconds) {
+          rows.delete(key);
+          affected += 1;
+        }
+      }
+
+      return [{ affectedRows: affected }];
+    }
+  };
+  const store = new MySqlIdempotencyStore({
+    database,
+    time: createTestTime(),
+    purgeMaxBatches: 2
+  });
+
+  const result = await store.purge();
+
+  // exhausted 是「清理追不上」唯一的訊號：行為完全正常，只是表越來越大。
+  assert.deepEqual(result, { removed: 2000, exhausted: true });
+  assert.equal(rows.size, 500);
+
+  // 下一輪把剩下的清完，這次就不再喊落後。
+  assert.deepEqual(await store.purge(), { removed: 500, exhausted: false });
+});
+
+test("the batch limit is configurable, and honoured", async () => {
+  const executed = [];
+  const database = {
+    query: async () => [[]],
+    execute: async (sql) => {
+      executed.push(sql);
+      return [{ affectedRows: 1000 }];
+    }
+  };
+
+  for (const purgeMaxBatches of [1, 3]) {
+    executed.length = 0;
+    const store = new MySqlIdempotencyStore({
+      database,
+      time: createTestTime(),
+      purgeMaxBatches
+    });
+
+    const { exhausted } = await store.purge();
+
+    assert.equal(executed.length, purgeMaxBatches);
+    assert.equal(exhausted, true);
+  }
+});
