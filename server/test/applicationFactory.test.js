@@ -249,11 +249,12 @@ test("responses that short-circuit the request still carry CORS headers", async 
   assert.ok(limited.headers.get("retry-after"));
 });
 
-test("the application starts even when the scheduler service is disabled", async (t) => {
+test("the application factory does not itself require the scheduler", async (t) => {
   const source = defaultConfigurationSource();
   const logger = memoryLogger();
-  // 排程器停用之後容器裡就沒有它。Application Factory 若硬性 require 它，一個
-  // 只是不想跑背景工作的部署會完全無法啟動。
+  // 這裡驗的是 Factory 自己不硬性依賴排程器——它只負責生命週期的先後，不碰
+  // 工作。停用排程器時整個應用能不能啟動是另一回事：宣告了它的 service（例如
+  // job.logRetention）會照統一規則在啟動時失敗，那是刻意的。
   const application = await createApplication({
     configurationSource: {
       ...source,

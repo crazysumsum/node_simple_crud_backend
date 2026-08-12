@@ -188,6 +188,13 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["logging", "time", "mysqldatabase"]
     },
     {
+      // jobs/ 就在 src/services/ 底下，所以定時工作被同一套自發現載入，
+      // 不需要第四套機制。
+      name: "job.logRetention",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "logging"]
+    },
+    {
       name: "time",
       lifecycle: "singleton",
       dependencies: []
