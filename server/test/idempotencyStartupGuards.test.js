@@ -3,7 +3,7 @@ import test from "node:test";
 import { validateApiConfig } from "../src/framework/middleware/apiDispatcher.js";
 import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { discoverServiceDefinitions } from "../src/framework/services/serviceDiscovery.js";
-import { IdempotencyPurgeJob } from "../src/services/scheduler/jobs/IdempotencyPurgeJob.js";
+import { IdempotencyPurgeJob } from "../src/services/idempotency/jobs/IdempotencyPurgeJob.js";
 
 // Idempotency 的兩種失效都是安靜的：route 以為自己防著重複提交但 service 不在，
 // 或租約短於請求時長讓兩個實例同時執行同一件工作。兩者都只能在啟動時擋。

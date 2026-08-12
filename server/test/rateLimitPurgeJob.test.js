@@ -5,7 +5,7 @@ import {
   RateLimitStore
 } from "../src/services/requestLimiter/RateLimitStore.js";
 import { RequestLimiterService } from "../src/services/requestLimiter/RequestLimiterService.js";
-import { RateLimitPurgeJob } from "../src/services/scheduler/jobs/RateLimitPurgeJob.js";
+import { RateLimitPurgeJob } from "../src/services/requestLimiter/jobs/RateLimitPurgeJob.js";
 import { createTestTime } from "../test-support/createTestTime.js";
 
 // 記憶體限流 store 的清理原本只掛在 consume() 上：一台不再有流量的實例永遠不會
