@@ -7,7 +7,7 @@ import { FileLogWriter } from "../src/services/logging/fileLogWriter.js";
 import { Logger } from "../src/services/logging/Logger.js";
 import { LoggerRegistry } from "../src/services/logging/LoggerRegistry.js";
 import { normalizeLoggerConfig } from "../src/services/logging/normalizeLoggingConfig.js";
-import { LogRetentionJob } from "../src/services/scheduler/jobs/LogRetentionJob.js";
+import { LogRetentionJob } from "../src/services/logging/jobs/LogRetentionJob.js";
 import { createTestTime } from "../test-support/createTestTime.js";
 
 // 清理原本只掛在 write() 上，所以一台不寫日誌的伺服器永遠不會清理。request
@@ -209,7 +209,8 @@ test("the job is discovered by the ordinary service mechanism", async () => {
   const found = definitions.find(({ name }) => name === "job.logRetention");
 
   // jobs/ 是放置慣例而不是新的發現機制：它就在 src/services/ 底下，所以
-  // 既有的掃描本來就會找到它。
+  // 既有的掃描本來就會找到它——不管掛在哪一個 service 的目錄下。
   assert.ok(found, "jobs/ 底下的 job 應由既有的 service 自發現載入");
-  assert.match(found.moduleUrl, /services\/scheduler\/jobs\/LogRetentionJob\.js$/);
+  // 工作跟著它服務的對象走，不是跟著排程器走。
+  assert.match(found.moduleUrl, /services\/logging\/jobs\/LogRetentionJob\.js$/);
 });

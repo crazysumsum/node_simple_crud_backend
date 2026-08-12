@@ -755,11 +755,15 @@ a job does not run.
 
 ### Jobs As Services
 
-When a service exists only to run one scheduled task, put it in
-`server/src/services/scheduler/jobs/`. That directory is already under
-`src/services`, so the ordinary service discovery finds it — there is no separate job
-discovery to learn. A job written that way keeps its declaration, its submission and
-its implementation in one file:
+When a service exists only to run one scheduled task, put it in a `jobs/`
+subdirectory of the service it serves — `services/logging/jobs/LogRetentionJob.js`,
+`services/idempotency/jobs/IdempotencyPurgeJob.js`. Those directories are already
+under `src/services`, so the ordinary service discovery finds them; there is no
+separate job discovery to learn. The scheduler has no `jobs/` of its own, because none
+of these tasks belong to it — it only runs them.
+
+A job written that way keeps its declaration, its submission and its implementation in
+one file:
 
 ```js
 export class LogRetentionJob extends BaseService {

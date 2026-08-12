@@ -8,8 +8,9 @@ import { BaseService } from "../../../framework/services/BaseService.js";
  * （initialize 裡的 register）與實作（run）都在同一個檔案裡，看程式碼的人不必
  * 熟悉框架也找得到全貌。
  *
- * jobs/ 只是放置慣例，不是強制的：任何 service 都可以宣告 static jobs 並自行
- * 提交。放在這裡代表「這個 service 的存在理由就是這件定時工作」。
+ * 它放在 logging 底下而不是排程器底下：這件工作屬於日誌，排程器只是執行它的
+ * 人。jobs/ 是放置慣例而不是強制的——任何 service 都可以宣告 static jobs 並
+ * 自行提交——放進這個子目錄代表「這個 service 的存在理由就是這件定時工作」。
  *
  * 因為它是一般 service，別處也能注入它來手動觸發——例如一個「立即清理」的
  * 管理接口，就是 services.require("job.logRetention").run()。

@@ -181,9 +181,27 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["mysqldatabase", "logging", "context", "time"]
     },
     {
+      // 每個 job 緊接在它服務的 service 後面，因為它就住在那個 service 的
+      // jobs/ 子目錄裡，而自發現是按模組路徑排序的。這份清單的順序本身就說明
+      // 了工作屬於誰。
+      //
+      // cluster scope：idempotency 表是所有實例共用的，每台都掃一次只是重複
+      // 同一個 DELETE。
+      name: "job.idempotencyPurge",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "idempotency"]
+    },
+    {
       name: "logging",
       lifecycle: "singleton",
       dependencies: ["time"]
+    },
+    {
+      // jobs/ 就在 src/services/ 底下，所以定時工作被同一套自發現載入，
+      // 不需要第四套機制。
+      name: "job.logRetention",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "logging"]
     },
     {
       name: "mysqldatabase",
@@ -198,30 +216,27 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["logging", "time"]
     },
     {
-      name: "scheduler",
-      lifecycle: "singleton",
-      dependencies: ["logging", "time", "mysqldatabase"]
-    },
-    {
-      // cluster scope：idempotency 表是所有實例共用的，每台都掃一次只是重複
-      // 同一個 DELETE。
-      name: "job.idempotencyPurge",
-      lifecycle: "singleton",
-      dependencies: ["scheduler", "idempotency"]
-    },
-    {
-      // jobs/ 就在 src/services/ 底下，所以定時工作被同一套自發現載入，
-      // 不需要第四套機制。
-      name: "job.logRetention",
-      lifecycle: "singleton",
-      dependencies: ["scheduler", "logging"]
-    },
-    {
       // 排程器依賴被隔離在葉子裡：掛在限流器身上的話，停用排程器會讓限流器
       // 建構失敗，而框架用 get() 取限流器——等於靜默地關掉限流。
       name: "job.rateLimitPurge",
       lifecycle: "singleton",
       dependencies: ["scheduler", "requestLimiter"]
+    },
+    {
+      // 排程器自己沒有任何 job：它只負責執行別人的工作。
+      name: "scheduler",
+      lifecycle: "singleton",
+      dependencies: ["logging", "time", "mysqldatabase"]
+    },
+    {
+      name: "time",
+      lifecycle: "singleton",
+      dependencies: []
+    },
+    {
+      name: "tokenRevocation",
+      lifecycle: "singleton",
+      dependencies: ["mysqldatabase", "logging", "time"]
     },
     {
       // cluster scope：撤銷表是所有實例共用的，每台都掃一次只是重複同一個
@@ -235,16 +250,6 @@ test("service discovery finds the built-in public services", async () => {
       name: "job.tokenRevocationRefresh",
       lifecycle: "singleton",
       dependencies: ["scheduler", "tokenRevocation", "logging"]
-    },
-    {
-      name: "time",
-      lifecycle: "singleton",
-      dependencies: []
-    },
-    {
-      name: "tokenRevocation",
-      lifecycle: "singleton",
-      dependencies: ["mysqldatabase", "logging", "time"]
     }
   ]);
 });

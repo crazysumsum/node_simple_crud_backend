@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { discoverServiceDefinitions } from "../src/framework/services/serviceDiscovery.js";
-import { TokenRevocationPurgeJob } from "../src/services/scheduler/jobs/TokenRevocationPurgeJob.js";
-import { TokenRevocationRefreshJob } from "../src/services/scheduler/jobs/TokenRevocationRefreshJob.js";
+import { TokenRevocationPurgeJob } from "../src/services/tokenRevocation/jobs/TokenRevocationPurgeJob.js";
+import { TokenRevocationRefreshJob } from "../src/services/tokenRevocation/jobs/TokenRevocationRefreshJob.js";
 
 // 這兩個 job 的 scope 相反，而且都不會在弄反時發出任何錯誤：
 //   refresh 弄成 cluster → 只有搶到租約的那台會更新快照，其餘實例的撤銷永遠
