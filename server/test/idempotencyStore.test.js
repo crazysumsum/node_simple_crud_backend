@@ -71,20 +71,22 @@ test("failing a key that was never started is harmless", async () => {
 
 // --- 完成 --------------------------------------------------------------------
 
-test("completing a key that expired mid-request does not throw", async () => {
+test("completing a key that expired mid-request does not throw or resurrect it", async () => {
   const { store, clock } = storeAtTime();
 
   await store.begin("slow", { fingerprint: "f", ttlMs: 1000 });
-  // 請求比 TTL 還久，中間又有別的請求觸發了清理。
+  // 請求跑得比自己的 TTL 還久。
   clock.nowMs = 2000;
-  await store.begin("other", { fingerprint: "f", ttlMs: 1000 });
-  assert.equal(store.entries.has("slow"), false);
 
   // handler 已經成功了。這裡若拋出，一個成功的請求會變成 500。
   await store.complete("slow", { statusCode: 201, body: {} }, { ttlMs: 1000 });
 
-  // 但也不該把一筆過期的紀錄復活成可重播的回應。
+  // 也不該把一筆過期的紀錄復活成可重播的回應：TTL 就是「回放能持續多久」的
+  // 承諾，過了就是過了。
   assert.equal(store.entries.has("slow"), false);
+  assert.deepEqual(await store.begin("slow", { fingerprint: "f", ttlMs: 1000 }), {
+    state: "started"
+  });
 });
 
 test("a completed entry replays the stored response", async () => {
@@ -102,7 +104,7 @@ test("a completed entry replays the stored response", async () => {
 
 // --- 過期清理 ----------------------------------------------------------------
 
-test("expired entries are removed, including ones still pending", async () => {
+test("the sweep removes expired entries, including ones still pending", async () => {
   const { store, clock } = storeAtTime();
 
   await store.begin("done", { fingerprint: "f", ttlMs: 1000 });
@@ -111,15 +113,77 @@ test("expired entries are removed, including ones still pending", async () => {
   await store.begin("stranded", { fingerprint: "f", ttlMs: 1000 });
   assert.equal(store.entries.size, 2);
 
-  // 邊界：expiresAt <= now 就算過期。
-  clock.nowMs = 1000;
+  // 掃描有最小間隔，所以要跨過它才會真的回收。
+  clock.nowMs = 60000;
   await store.begin("trigger", { fingerprint: "f", ttlMs: 1000 });
 
-  // 不清的話 store 會無限成長，而且崩潰留下的 key 永遠不能重試。
+  // 不回收的話 store 會無限成長。
   assert.deepEqual([...store.entries.keys()], ["trigger"]);
+});
+
+test("an expired key is reusable before the sweep gets round to it", async () => {
+  const { store, clock } = storeAtTime();
+
+  await store.begin("stranded", { fingerprint: "f", ttlMs: 1000 });
+
+  // 剛好過期，但離下一次掃描還很遠。
+  clock.nowMs = 1000;
+
+  // 節流的是回收，不是過期判斷。這裡若回 inProgress，一個崩潰留下的 key 會把
+  // 客戶端擋在 409 直到掃描輪到它——那正是把效能優化做成正確性問題。
   assert.deepEqual(await store.begin("stranded", { fingerprint: "f", ttlMs: 1000 }), {
     state: "started"
   });
+});
+
+test("an expired completed entry is not replayed before the sweep", async () => {
+  const { store, clock } = storeAtTime();
+
+  await store.begin("order", { fingerprint: "f", ttlMs: 1000 });
+  await store.complete("order", { statusCode: 201, body: { id: 1 } }, { ttlMs: 1000 });
+
+  clock.nowMs = 1000;
+
+  // TTL 是「回放能持續多久」的承諾。過期後還回放，等於這個承諾取決於剛好有
+  // 沒有別的請求觸發掃描。
+  assert.deepEqual(await store.begin("order", { fingerprint: "f", ttlMs: 1000 }), {
+    state: "started"
+  });
+});
+
+test("the sweep is throttled instead of running on every begin", async () => {
+  const { store, clock } = storeAtTime();
+
+  await store.begin("first", { fingerprint: "f", ttlMs: 1000 });
+  const sweptAt = store.lastCleanupAt;
+
+  clock.nowMs = 59999;
+  await store.begin("second", { fingerprint: "f", ttlMs: 1000 });
+
+  // 掃描是 O(n)，maxEntries 預設 10000——掛在每個請求上就是每個 idempotent
+  // 請求都走一遍上萬筆。
+  assert.equal(store.lastCleanupAt, sweptAt, "還沒到間隔就不該重掃");
+
+  clock.nowMs = 60000;
+  await store.begin("third", { fingerprint: "f", ttlMs: 1000 });
+  assert.equal(store.lastCleanupAt, 60000);
+});
+
+test("the capacity boundary forces a sweep before refusing a request", async () => {
+  const { store, clock } = storeAtTime({ maxEntries: 2 });
+
+  await store.begin("a", { fingerprint: "f", ttlMs: 1000 });
+  await store.begin("b", { fingerprint: "f", ttlMs: 1000 });
+
+  // 兩筆都過期了，但離下一次排定的掃描還很遠。
+  clock.nowMs = 1000;
+
+  // 照著一個塞滿過期項目的 size 回 capacityExceeded，等於拒絕一個其實有空位
+  // 的請求——而且是在最不該省那次掃描的地方省。
+  assert.deepEqual(await store.begin("c", { fingerprint: "f", ttlMs: 1000 }), {
+    state: "started"
+  });
+  assert.deepEqual([...store.entries.keys()], ["c"]);
 });
 
 test("an entry that has not expired survives cleanup", async () => {
