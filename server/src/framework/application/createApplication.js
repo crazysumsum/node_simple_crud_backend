@@ -20,7 +20,6 @@ import {
 } from "../middleware/apiDispatcher.js";
 import { createErrorHandler } from "../middleware/errorHandler.js";
 import { sendError } from "../http/apiResponse.js";
-import { RequestLimiter } from "../middleware/requestLimiter.js";
 import {
   createCorsOptions,
   createHttpsEnforcementMiddleware,
@@ -199,10 +198,11 @@ class Application {
       { reason, shutdownStartedAt, timeoutMs }
     );
 
-    const rejectedQueuedRequests = this.requestLimiter.shutdown();
-    const activeRequestsDrainedPromise = this.requestLimiter.waitForIdle(
-      remainingTime()
-    );
+    // 限流器可以不存在。它不在的時候沒有佇列要拒絕，也沒有自己的在途計數——
+    // closeHttpServer() 仍然會等在途連線結束，排空並沒有消失，只是換了機制。
+    const rejectedQueuedRequests = this.requestLimiter?.stopAccepting() ?? 0;
+    const activeRequestsDrainedPromise =
+      this.requestLimiter?.waitForIdle(remainingTime()) ?? Promise.resolve(true);
     const httpServerClosedPromise = closeHttpServer(
       this.server,
       remainingTime()
@@ -223,10 +223,8 @@ class Application {
         httpServerClosedPromise,
         schedulerStoppedPromise
       ]);
-    const rateLimitStoreClosed = await closeResource(
-      this.requestLimiter,
-      remainingTime()
-    );
+    // 限流 store 的關閉現在就是一次 service 關閉，由容器負責，失敗會出現在
+    // serviceFailures 裡。不再需要一個專屬的回報欄位。
     const idempotencyStoreClosed = await closeResource(
       this.idempotencyManager,
       remainingTime()
@@ -247,7 +245,6 @@ class Application {
         activeRequestsDrained,
         httpServerClosed,
         schedulerDrained,
-        rateLimitStoreClosed,
         idempotencyStoreClosed,
         servicesClosed: serviceShutdown.closed,
         serviceFailures: serviceShutdown.failures.map(({ name }) => name)
@@ -265,7 +262,6 @@ class Application {
       !activeRequestsDrained ||
       !httpServerClosed ||
       !schedulerDrained ||
-      !rateLimitStoreClosed ||
       !idempotencyStoreClosed ||
       !serviceShutdown.closed ||
       !loggingShutdown.closed
@@ -279,7 +275,6 @@ class Application {
       activeRequestsDrained,
       httpServerClosed,
       schedulerDrained,
-      rateLimitStoreClosed,
       idempotencyStoreClosed,
       servicesClosed: serviceShutdown.closed && loggingShutdown.closed
     });
@@ -324,8 +319,6 @@ export async function createApplication({
   logger,
   loggerRegistry,
   requestLogger,
-  requestLimiter,
-  rateLimitStore,
   idempotencyManager,
   idempotencyStore,
   serviceDiscoveryOptions,
@@ -373,6 +366,9 @@ export async function createApplication({
   // 先後——與 HTTP server 同一類。用 get() 而非 require()：排程器被停用的部署
   // 不該因此無法啟動。
   const activeScheduler = services.get("scheduler") ?? null;
+  // 限流器與排程器同一類：框架安排它的生命週期先後，但不要求它存在。用 get()
+  // 而非 require()，停用限流器的部署不該因此無法啟動。eager 保證它已經建好。
+  const activeRequestLimiter = services.get("requestLimiter") ?? null;
   let activeStrategies = strategies;
 
   try {
@@ -398,24 +394,15 @@ export async function createApplication({
         environment
       });
 
-    if (
-      !requestLimiter &&
-      !rateLimitStore &&
-      configuration.request.limits.storeAdapter !== "memory"
-    ) {
-      throw new Error(
-        `RateLimitStore adapter must be injected for ${configuration.request.limits.storeAdapter}`
+    if (!activeRequestLimiter) {
+      // 沒有限流就沒有 429、沒有並行上限、沒有佇列。這是安全姿態的改變，不該
+      // 只靠啟動日誌裡那份 disabledServices 清單被人翻到。
+      void activeLogger.warn(
+        "request.limit.disabled",
+        "Request limiter service is disabled; no rate limiting is applied",
+        { service: "requestLimiter" }
       );
     }
-
-    const activeRequestLimiter =
-      requestLimiter ||
-      new RequestLimiter({
-        config: configuration.request.limits,
-        logger: activeLogger,
-        time,
-        store: rateLimitStore
-      });
 
     if (
       !idempotencyManager &&
@@ -509,7 +496,11 @@ export async function createApplication({
     // 有機會觸發這個警告。
     app.use(createProxyHeaderCheckMiddleware(security, activeLogger));
     app.use(createHttpsEnforcementMiddleware(security));
-    app.use(activeRequestLimiter.middleware());
+
+    if (activeRequestLimiter) {
+      app.use(activeRequestLimiter.middleware());
+    }
+
     app.use(
       createRequestServiceScopeMiddleware({
         services,
@@ -556,7 +547,7 @@ export async function createApplication({
           "cors",
           "proxyHeaderCheck",
           "httpsEnforcement",
-          "requestLimiter",
+          ...(activeRequestLimiter ? ["requestLimiter"] : []),
           "requestServiceScope",
           "jsonParser",
           "apiDispatcher",

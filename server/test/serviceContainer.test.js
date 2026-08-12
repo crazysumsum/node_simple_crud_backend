@@ -183,6 +183,13 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["logging", "context"]
     },
     {
+      // 限流器是 service，中間件只是它的產出。框架用 get() 取它，所以停用之後
+      // 應用照常啟動，只是不掛限流。
+      name: "requestLimiter",
+      lifecycle: "singleton",
+      dependencies: ["logging", "time"]
+    },
+    {
       name: "scheduler",
       lifecycle: "singleton",
       dependencies: ["logging", "time", "mysqldatabase"]
@@ -193,6 +200,13 @@ test("service discovery finds the built-in public services", async () => {
       name: "job.logRetention",
       lifecycle: "singleton",
       dependencies: ["scheduler", "logging"]
+    },
+    {
+      // 排程器依賴被隔離在葉子裡：掛在限流器身上的話，停用排程器會讓限流器
+      // 建構失敗，而框架用 get() 取限流器——等於靜默地關掉限流。
+      name: "job.rateLimitPurge",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "requestLimiter"]
     },
     {
       name: "time",
