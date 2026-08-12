@@ -1,4 +1,3 @@
-import { normalizeIdempotencyConfig } from "../idempotency/normalizeIdempotencyConfig.js";
 import { normalizeApiVersioningConfig } from "../versioning/normalizeApiVersioningConfig.js";
 import {
   normalizeApiDefaultsConfig,
@@ -11,11 +10,10 @@ export function normalizeApiConfig(source) {
   const defaults = normalizeApiDefaultsConfig(source.defaults, {
     defaultVersion: versioning.defaultVersion
   });
-  const idempotency = normalizeIdempotencyConfig(source.idempotency);
-
   if (!versioning.supportedVersions.includes(defaults.version)) {
     throw new Error("API defaults version must be listed in supportedVersions");
   }
 
-  return Object.freeze({ defaults, versioning, idempotency });
+  // idempotency 是一個 service，設定自己一個區塊、自己一個檔案。
+  return Object.freeze({ defaults, versioning });
 }

@@ -14,10 +14,10 @@ import { fileURLToPath } from "node:url";
  * 「壞掉會很貴而且不容易在開發時發現」的才需要。
  */
 const FLOORS = {
-  "src/framework/idempotency/IdempotencyManager.js": { lines: 95, branches: 85 },
+  "src/services/idempotency/IdempotencyService.js": { lines: 95, branches: 85 },
   // functions 在這裡是必要的：這個檔案曾經 lines 88%／branches 86% 穩穩過關，
   // 而 fail()（釋放 key 的唯一路徑）與過期清理的刪除分支從來沒有被呼叫過。
-  "src/framework/idempotency/IdempotencyStore.js": {
+  "src/services/idempotency/IdempotencyStore.js": {
     lines: 95,
     branches: 90,
     functions: 90
@@ -36,6 +36,13 @@ const FLOORS = {
   // 限流器壞掉有兩種形態：安靜地不再限流，或把佇列卡死。前者在開發時完全看
   // 不出來，後者只在有負載時才發作。
   "src/services/requestLimiter/RequestLimiterService.js": { lines: 85, branches: 75 },
+  // 共享 idempotency 的失效是安靜的：互斥一旦破掉，症狀只是「偶爾重複執行」，
+  // 而那在單機開發時永遠不會出現。
+  "src/services/idempotency/MySqlIdempotencyStore.js": {
+    lines: 95,
+    branches: 90,
+    functions: 95
+  },
   // 撤銷壞掉的每一種形態都是安靜的：快照沒更新、切線算錯一秒、清理刪早了，
   // 症狀全都是「已撤銷的 token 還能用」，不會有任何錯誤浮現。
   "src/services/tokenRevocation/TokenRevocationService.js": { lines: 90, branches: 85 }

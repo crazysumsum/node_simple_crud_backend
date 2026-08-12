@@ -16,6 +16,9 @@ import {
   validateApiConfig
 } from "../src/framework/middleware/apiDispatcher.js";
 import { createErrorHandler } from "../src/framework/middleware/errorHandler.js";
+import { IdempotencyService } from "../src/services/idempotency/IdempotencyService.js";
+import { MemoryIdempotencyStore } from "../src/services/idempotency/IdempotencyStore.js";
+import { normalizeIdempotencyConfig } from "../src/services/idempotency/normalizeIdempotencyConfig.js";
 import {
   createTestTime,
   servicesWithTime
@@ -66,10 +69,34 @@ const apiRouteDefaults = {
   idempotency: { enabled: false }
 };
 
+/**
+ * 記憶體版的 idempotency service。dispatcher 先前在沒有注入時會自己造一個
+ * memory manager，那條後路已經拿掉——會靜默給出單實例語意的 idempotency，
+ * 而多實例部署下那等於沒有 idempotency。所以測試要自己提供。
+ */
+function memoryIdempotency() {
+  return new IdempotencyService({
+    config: normalizeIdempotencyConfig({
+      headerName: "Idempotency-Key",
+      maxKeyLength: 128,
+      defaultTtlMs: 60000,
+      pendingLeaseMs: 120000,
+      cacheableStatusCodes: [200, 201, 202, 204],
+      storeAdapter: "memory",
+      storeKeyPrefix: "test",
+      memoryMaxEntries: 100
+    }),
+    store: new MemoryIdempotencyStore(),
+    logger: silentLogger,
+    context: requestContext
+  });
+}
+
 function createApiDispatcher(options = {}) {
   return createDispatcher({
     strategies: defaultAuthStrategies,
     context: requestContext,
+    idempotency: memoryIdempotency(),
     time,
     ...options
   });
@@ -192,7 +219,7 @@ test("dispatcher invokes a configured public API", async (t) => {
         sunsetAt: null,
         replacement: null
       },
-      idempotency: { enabled: false, ttlMs: 86400000 },
+      idempotency: { enabled: false, ttlMs: 60000 },
       // route 未指定時收斂成安全預設，requestLogger 才能無條件讀取。
       logging: { bodyCapture: "none" },
       // 檔案上傳與下載都必須明確啟用。

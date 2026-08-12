@@ -133,7 +133,10 @@ async function startApplication(t, { limits } = {}) {
     configurationSource: {
       ...source,
       application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 },
-      requestLimiter: { ...source.requestLimiter, ...limits }
+      requestLimiter: { ...source.requestLimiter, ...limits },
+      // 這裡測的是上傳與 idempotency 的互動，不是共享 store。假 pool 對每一句
+      // SQL 都回成功，mysql adapter 在它上面等於沒有 idempotency。
+      idempotency: { ...source.idempotency, storeAdapter: "memory" }
     },
     handlerRegistryOptions: {
       moduleUrls: ["virtual:fileTransferFailureModes"],

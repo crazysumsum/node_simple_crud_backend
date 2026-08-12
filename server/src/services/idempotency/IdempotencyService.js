@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { ApplicationError } from "../errors/ApplicationError.js";
+import { ApplicationError } from "../../framework/errors/ApplicationError.js";
 import {
   IdempotencyStore,
   MemoryIdempotencyStore
 } from "./IdempotencyStore.js";
+import { MySqlIdempotencyStore } from "./MySqlIdempotencyStore.js";
+import { normalizeIdempotencyConfig } from "./normalizeIdempotencyConfig.js";
 
 function canonicalValue(value) {
   if (Array.isArray(value)) {
@@ -55,17 +57,45 @@ export class IdempotencyError extends ApplicationError {
   }
 }
 
-export class IdempotencyManager {
-  constructor({ config, store, logger, context } = {}) {
-    this.config = config;
-    this.store =
-      store ||
-      new MemoryIdempotencyStore({ maxEntries: config.memoryMaxEntries });
-    this.logger = logger;
-    this.context = context;
+/** route 沒有 idempotency service 可用時的固定結果。 */
+export const DISABLED_ROUTE_IDEMPOTENCY = Object.freeze({
+  enabled: false,
+  ttlMs: 0
+});
 
-    if (!context || typeof context.get !== "function") {
-      throw new TypeError("IdempotencyManager requires a request context service");
+/**
+ * Idempotency：同一個 key 的請求只執行一次，之後重播第一次的回應。
+ *
+ * 它是 service 而不是由 Factory 手工組裝的物件，因為共享 store 需要注入
+ * mysqldatabase——那正是當初讓限流器變成 service 的同一個理由。
+ *
+ * 框架用 services.get() 取它，所以停用之後應用仍然啟動；但任何仍宣告
+ * idempotency 的 route 會讓啟動失敗。這兩件事不衝突：框架本身不依賴它，
+ * 而「以為有 idempotency 但其實沒有」不能是一個安靜的狀態。
+ */
+export class IdempotencyService {
+  static service = Object.freeze({
+    name: "idempotency",
+    lifecycle: "singleton",
+    dependencies: ["mysqldatabase", "logging", "context", "time"],
+    // Factory 用 get() 取，而 get() 只回傳已建立的實例。改成 lazy 會讓
+    // idempotency 靜默地不生效。
+    eager: true
+  });
+
+  constructor({ config, store, logger, context, services, options = {} } = {}) {
+    const managed = services && typeof services.require === "function";
+
+    this.config = managed
+      ? normalizeIdempotencyConfig(config?.idempotency)
+      : config;
+    this.logger = managed ? services.require("logging").logger : logger;
+    this.context = managed ? services.require("context") : context;
+    this.time = managed ? services.require("time") : options.time;
+    this.store = store || options.store || this.createStore(managed, services);
+
+    if (!this.context || typeof this.context.get !== "function") {
+      throw new TypeError("IdempotencyService requires a request context service");
     }
 
     if (
@@ -80,9 +110,35 @@ export class IdempotencyManager {
     }
   }
 
+  createStore(managed, services) {
+    if (this.config.storeAdapter === "memory") {
+      return new MemoryIdempotencyStore({
+        maxEntries: this.config.memoryMaxEntries,
+        now: this.time ? () => this.time.nowMs() : undefined
+      });
+    }
+
+    if (!managed) {
+      throw new TypeError(
+        `The ${this.config.storeAdapter} idempotency adapter needs the service container; inject a store instead.`
+      );
+    }
+
+    return new MySqlIdempotencyStore({
+      database: services.require("mysqldatabase"),
+      time: this.time,
+      maxResponseBytes: this.config.maxResponseBytes
+    });
+  }
+
+  /** 處理中的 key 最多鎖多久。啟動時的交叉檢查會讀它。 */
+  get pendingLeaseMs() {
+    return this.config.pendingLeaseMs;
+  }
+
   routeOptions(source, routeKey) {
     const routeConfig = source || { enabled: false };
-    const enabled = this.config.enabled && routeConfig.enabled === true;
+    const enabled = routeConfig.enabled === true;
     const ttlMs = Number(routeConfig.ttlMs ?? this.config.defaultTtlMs);
 
     if (!Number.isInteger(ttlMs) || ttlMs <= 0) {
@@ -137,7 +193,8 @@ export class IdempotencyManager {
     try {
       begin = await this.store.begin(storeKey, {
         fingerprint,
-        ttlMs: routeOptions.ttlMs
+        ttlMs: routeOptions.ttlMs,
+        pendingLeaseMs: this.config.pendingLeaseMs
       });
     } catch (error) {
       throw new IdempotencyError(
@@ -249,7 +306,22 @@ export class IdempotencyManager {
     }
   }
 
-  close() {
-    return this.store.close?.();
+  /** 刪除過期紀錄。由 IdempotencyPurgeJob 以 cluster scope 排程。 */
+  async purge() {
+    const removed = (await this.store.purge?.()) ?? 0;
+
+    if (removed > 0) {
+      await this.logger?.info?.(
+        "idempotency.purged",
+        "Expired idempotency records were removed",
+        { removedRecords: removed, storeAdapter: this.config.storeAdapter }
+      );
+    }
+
+    return removed;
+  }
+
+  async shutdown() {
+    await this.store.close?.();
   }
 }

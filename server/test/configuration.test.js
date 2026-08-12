@@ -15,6 +15,8 @@ test("global configuration validation normalizes every configuration section", (
     "api",
     "application",
     "database",
+    // idempotency 也是一個 service，設定自己一個區塊、自己一個檔案。
+    "idempotency",
     "jwt",
     "logging",
     "request",
@@ -30,8 +32,10 @@ test("global configuration validation normalizes every configuration section", (
   assert.equal(configuration.api.defaults.authType, "jwt");
   assert.equal(configuration.api.defaults.version, "v1");
   assert.equal(configuration.api.versioning.defaultVersion, "v1");
-  assert.equal(configuration.api.idempotency.headerName, "Idempotency-Key");
-  assert.equal(configuration.api.idempotency.storeAdapter, "memory");
+  assert.equal(configuration.idempotency.headerName, "Idempotency-Key");
+  // 預設是 mysql：memory adapter 的狀態在各自的行程裡，多實例部署下同一個 key
+  // 打到不同實例會各自執行一次，而那是負載平衡下的常態。
+  assert.equal(configuration.idempotency.storeAdapter, "mysql");
   assert.equal(configuration.logging.loggers.request.filePrefix, "requests");
   assert.equal(configuration.logging.loggers.request.minimumLevel, "info");
   assert.equal(configuration.logging.loggers.system.filePrefix, "system");

@@ -1,6 +1,7 @@
 import applicationConfig from "../../../config/application.js";
 import apiConfig from "../../../config/api.js";
 import databaseConfig from "../../../config/database.js";
+import idempotencyConfig from "../../../config/idempotency.js";
 import jwtConfig from "../../../config/jwt.js";
 import loggingConfig from "../../../config/logging.js";
 import requestConfig from "../../../config/request.js";
@@ -14,6 +15,7 @@ import { normalizeApiConfig } from "../api/normalizeApiConfig.js";
 import { ConfigurationError } from "./ConfigurationError.js";
 import { normalizeApplicationConfig } from "./normalizeApplicationConfig.js";
 import { normalizeDatabaseConfig } from "./normalizeDatabaseConfig.js";
+import { normalizeIdempotencyConfig } from "../../services/idempotency/normalizeIdempotencyConfig.js";
 import { normalizeJwtConfig } from "./normalizeJwtConfig.js";
 import { normalizeRequestConfig } from "./normalizeRequestConfig.js";
 import { normalizeRequestLimiterConfig } from "../../services/requestLimiter/normalizeRequestLimiterConfig.js";
@@ -25,6 +27,7 @@ export function defaultConfigurationSource() {
     application: applicationConfig,
     api: apiConfig,
     database: databaseConfig,
+    idempotency: idempotencyConfig,
     jwt: jwtConfig,
     logging: loggingConfig,
     request: requestConfig,
@@ -54,6 +57,9 @@ export function validateApplicationConfiguration(
   );
   validateSection("api", () => normalizeApiConfig(source?.api));
   validateSection("database", () => normalizeDatabaseConfig(source?.database));
+  validateSection("idempotency", () =>
+    normalizeIdempotencyConfig(source?.idempotency)
+  );
   validateSection("jwt", () => normalizeJwtConfig(source?.jwt));
   validateSection("logging", () => normalizeLoggingConfig(source?.logging));
   validateSection("request", () =>

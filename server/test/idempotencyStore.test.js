@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   IdempotencyStore,
   MemoryIdempotencyStore
-} from "../src/framework/idempotency/IdempotencyStore.js";
+} from "../src/services/idempotency/IdempotencyStore.js";
 
 const options = { fingerprint: "same-input", ttlMs: 60000 };
 

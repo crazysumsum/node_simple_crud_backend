@@ -4,8 +4,8 @@ import { AuthenticationError } from "../src/framework/auth/AuthenticationError.j
 import {
   resetInternalFailureReports
 } from "../src/framework/diagnostics/reportInternalFailure.js";
-import { IdempotencyManager } from "../src/framework/idempotency/IdempotencyManager.js";
-import { normalizeIdempotencyConfig } from "../src/framework/idempotency/normalizeIdempotencyConfig.js";
+import { IdempotencyService } from "../src/services/idempotency/IdempotencyService.js";
+import { normalizeIdempotencyConfig } from "../src/services/idempotency/normalizeIdempotencyConfig.js";
 import { ServiceContainer } from "../src/framework/services/ServiceContainer.js";
 import { JwtAuthStrategy } from "../src/services/auth/jwtAuthStrategy.js";
 
@@ -100,9 +100,8 @@ test("a rejected JWT records why it failed without telling the client", async ()
 
 test("failing to release an idempotency key is logged, not swallowed", async () => {
   const logger = collectingLogger();
-  const manager = new IdempotencyManager({
+  const manager = new IdempotencyService({
     config: normalizeIdempotencyConfig({
-      enabled: true,
       headerName: "Idempotency-Key",
       maxKeyLength: 128,
       defaultTtlMs: 60000,
