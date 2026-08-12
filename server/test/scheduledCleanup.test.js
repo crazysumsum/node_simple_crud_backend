@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { FileLogWriter } from "../src/services/logging/fileLogWriter.js";
-import { LogRetentionService } from "../src/services/logging/LogRetentionService.js";
+import { SchedulerService } from "../src/services/scheduler/SchedulerService.js";
+import { normalizeSchedulerConfig } from "../src/services/scheduler/normalizeSchedulerConfig.js";
 import { normalizeLoggerConfig } from "../src/services/logging/normalizeLoggingConfig.js";
 import { createTestTime } from "../test-support/createTestTime.js";
 
@@ -114,37 +115,49 @@ test("a disabled logger has no writer and cleanup is a no-op", async () => {
   await logger.cleanup();
 });
 
-test("the retention service registers its job and cleans every logger profile", async () => {
+test("the scheduler owns the log retention job so disabling it degrades cleanly", async () => {
   const cleaned = [];
-  const registered = [];
+  const silent = {
+    debug: async () => {},
+    info: async () => {},
+    warn: async () => {},
+    error: async () => {}
+  };
   const logging = {
+    logger: silent,
     async cleanup() {
       cleaned.push("all");
     }
   };
-  const scheduler = {
-    register(instance) {
-      registered.push(instance);
-    }
-  };
-  const service = new LogRetentionService({
-    config: {},
-    services: { require: (name) => ({ logging, scheduler }[name]) }
+  const scheduler = new SchedulerService({
+    config: { scheduler: normalizeSchedulerConfig({}) },
+    services: {
+      require: (name) =>
+        ({
+          logging,
+          time: { nowMs: () => 0 },
+          mysqldatabase: { withTransaction: async () => {}, execute: async () => {} }
+        })[name]
+    },
+    options: { leaseStore: { async prepare() {}, async acquire() { return true; }, async release() {} } }
   });
 
-  await service.initialize();
+  await scheduler.initialize();
 
-  // Push 模式：service 自己提交，排程器不走訪容器。
-  assert.deepEqual(registered, [service]);
-
-  const [job] = LogRetentionService.jobs;
+  // 排程器照一般規則提交自己的工作，沒有特例路徑。
+  const [job] = scheduler.describeJobs();
   assert.equal(job.name, "logging.retentionCleanup");
-  assert.equal(job.method, "cleanup");
+  assert.equal(job.service, "scheduler");
   // 日誌檔在各自的本機磁碟上，每個實例都得清自己的。
-  assert.equal(job.scope, undefined, "預設 instance scope");
+  assert.equal(job.scope, "instance");
 
-  await service[job.method]();
+  await scheduler.cleanupLogs();
   assert.deepEqual(cleaned, ["all"]);
+
+  // 這個工作若掛在一個宣告 scheduler 為依賴的獨立 service 上，把排程器
+  // static service.enabled 停掉就會讓整個應用起不來。掛在排程器身上，停用它
+  // 只是「沒有背景工作」，清理退回由 write() 觸發的舊路徑。
+  await scheduler.stop();
 });
 
 test("the rate limit store is purged without traffic", async () => {
@@ -216,6 +229,25 @@ test("the request limiter submits its own purge job when given a scheduler", asy
     time: { nowMs: () => 0, timestamp: () => "t" }
   });
   assert.equal(typeof standalone.purgeExpired, "function");
+});
+
+test("no built-in service depends on the scheduler, so disabling it is safe", async () => {
+  const { discoverServiceDefinitions } = await import(
+    "../src/framework/services/serviceDiscovery.js"
+  );
+  const definitions = await discoverServiceDefinitions();
+  const dependants = definitions
+    .filter(({ dependencies }) => dependencies.includes("scheduler"))
+    .map(({ name }) => name);
+
+  // 應用自己的 service 當然可以宣告 scheduler——那是文件寫的 push 模式，代價是
+  // 停用排程器時它會大聲失敗。但框架內建的 service 不行：那會讓「這個部署不跑
+  // 背景工作」變成整個應用起不來。內建的清理工作因此掛在排程器自己身上。
+  assert.deepEqual(
+    dependants,
+    [],
+    `內建 service 不得依賴 scheduler，否則停用它會讓應用無法啟動：${dependants.join(", ")}`
+  );
 });
 
 test("the registry fans cleanup out to every profile", async () => {

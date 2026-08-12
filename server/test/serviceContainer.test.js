@@ -173,12 +173,6 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: []
     },
     {
-      // scheduler 依賴 logging，所以清理工作由第三者持有，避免相依成環。
-      name: "logRetention",
-      lifecycle: "singleton",
-      dependencies: ["scheduler", "logging"]
-    },
-    {
       name: "logging",
       lifecycle: "singleton",
       dependencies: ["time"]

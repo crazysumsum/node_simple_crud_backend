@@ -796,14 +796,25 @@ so log files outlived their configured retention indefinitely. Each hourly run s
 respects the profile's own `cleanupIntervalHours`, so the existing configuration means
 exactly what it did before; only the trigger changed.
 
-`RequestLimiter` is not a service — the factory builds it after the container — so the
-scheduler is handed to it as a collaborator alongside `logger` and `time`, and it
-submits its own job. Without a scheduler it falls back to the activity-triggered path.
+**Both keep working when the scheduler is switched off.** Their activity-triggered
+paths were not removed — the job only adds a second trigger, so cleanup still happens
+on write and on consume. Two details make that hold:
 
-`LogRetentionService` exists as a separate service rather than a job on
-`LoggingService` because the scheduler depends on `logging`; the reverse dependency
-would be a cycle and the container rejects it at startup. A third service depending on
-both is the way out.
+- Log retention is a job on the scheduler itself, not on a separate service. A
+  separate service would have to declare `scheduler` as a dependency, and then
+  `static service.enabled = false` on the scheduler would stop the whole application
+  from starting — far too much consequence for "this deployment does not run
+  background jobs". The scheduler already depends on `logging`, so owning the job adds
+  no coupling. It cannot live on `LoggingService` either: the scheduler depends on
+  `logging`, so the reverse would be a cycle and the container rejects it at startup.
+- `RequestLimiter` is not a service — the factory builds it after the container — so
+  the scheduler is handed to it as a collaborator alongside `logger` and `time`, and
+  it submits its own job. A null scheduler simply means no job.
+
+No built-in service declares `scheduler` as a dependency, and a test enforces that.
+Application services are free to declare it, as shown above; the trade-off is that
+disabling the scheduler then fails loudly for them, which is the right outcome for
+work someone deliberately opted into.
 
 ### Configuration
 

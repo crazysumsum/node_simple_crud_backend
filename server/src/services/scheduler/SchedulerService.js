@@ -30,10 +30,32 @@ export class SchedulerService extends BaseService {
     eager: true
   });
 
+  /**
+   * 框架自己的維護工作。
+   *
+   * 放在這裡而不是獨立一個 service，是因為那樣的 service 必須宣告 scheduler
+   * 為依賴，於是把排程器 static service.enabled 停掉會讓整個應用起不來——
+   * 只是不想跑背景工作的部署不該有這種後果。掛在排程器身上，停用它就只是
+   * 「沒有背景工作」，清理自動退回由活動觸發的舊路徑。
+   *
+   * 排程器本來就依賴 logging，所以沒有引入任何新的耦合。
+   */
+  static jobs = Object.freeze([
+    {
+      name: "logging.retentionCleanup",
+      method: "cleanupLogs",
+      // 每小時檢查一次；真正是否清理仍由各 profile 的 cleanupIntervalHours
+      // 決定，所以既有設定的語意完全不變。
+      intervalMs: 3_600_000,
+      timeoutMs: 60_000
+    }
+  ]);
+
   constructor({ config, services, options = {} } = {}) {
     super({ config, services, options });
     this.schedulerConfig = config.scheduler;
-    this.logger = services.require("logging").logger;
+    this.logging = services.require("logging");
+    this.logger = this.logging.logger;
     this.time = services.require("time");
     this.database = services.require("mysqldatabase");
 
@@ -52,6 +74,16 @@ export class SchedulerService extends BaseService {
     this.stats = new Map();
     this.started = false;
     this.stopped = false;
+  }
+
+  async initialize() {
+    // 排程器也照一般規則提交自己的工作，沒有特例路徑。
+    this.register(this);
+  }
+
+  /** 清除過期的日誌檔。原本只掛在 write() 上，安靜的伺服器因此永遠不清理。 */
+  async cleanupLogs() {
+    await this.logging.cleanup();
   }
 
   /**
