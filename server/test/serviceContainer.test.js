@@ -223,10 +223,19 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["scheduler", "requestLimiter"]
     },
     {
-      // 排程器自己沒有任何 job：它只負責執行別人的工作。
       name: "scheduler",
       lifecycle: "singleton",
       dependencies: ["logging", "time", "mysqldatabase"]
+    },
+    {
+      // 排程器唯一自己的 job：發佈自己的統計。執行別人的工作不是它的事，但
+      // 公開自己的狀態是。
+      //
+      // instance scope：每個實例都必須回報自己，換成 cluster 就只剩 leader
+      // 那一台有資料，而「哪一台不健康」正是這張表要回答的問題。
+      name: "job.schedulerStatsFlush",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "logging", "mysqldatabase"]
     },
     {
       name: "time",

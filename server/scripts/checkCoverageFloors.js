@@ -33,6 +33,17 @@ const FLOORS = {
   "src/services/scheduler/SchedulerService.js": { lines: 90, branches: 85 },
   "src/services/scheduler/JobLeaseStore.js": { lines: 95, branches: 95 },
   "src/services/scheduler/normalizeJobDefinition.js": { lines: 90, branches: 78 },
+  // 統計表的刪除是這個框架裡少數會弄丟別人資料的操作：deleteInstance 少一個
+  // WHERE，滾動重啟就會讓每個實例輪流抹掉同儕的列。而症狀只是「表怎麼常常
+  // 是空的」，不會有任何錯誤。
+  "src/services/scheduler/JobStatsStore.js": { lines: 95, branches: 90, functions: 95 },
+  // 發佈統計的降級路徑（寫不進去就自己關掉）平常永遠不會執行到，但它是「診斷
+  // 資料壞掉不該拖垮應用」這個承諾的唯一實作。
+  "src/services/scheduler/jobs/JobStatsFlushJob.js": {
+    lines: 95,
+    branches: 90,
+    functions: 95
+  },
   // 限流器壞掉有兩種形態：安靜地不再限流，或把佇列卡死。前者在開發時完全看
   // 不出來，後者只在有負載時才發作。
   "src/services/requestLimiter/RequestLimiterService.js": { lines: 85, branches: 75 },

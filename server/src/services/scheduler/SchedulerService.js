@@ -5,6 +5,19 @@ import { MySqlJobLeaseStore } from "./JobLeaseStore.js";
 import { BaseService } from "../../framework/services/BaseService.js";
 
 /**
+ * 統計欄位存的錯誤上限。這個值同時是 fr_job_stats.last_error 的欄寬——留一份在
+ * 記憶體裡的統計沒有理由無界成長，而截斷在來源做，兩邊就不會不一致。
+ */
+export const MAX_STATS_ERROR_LENGTH = 500;
+
+function describeError(error) {
+  const text = `${error?.name || "Error"}: ${error?.message || ""}`;
+  return text.length > MAX_STATS_ERROR_LENGTH
+    ? `${text.slice(0, MAX_STATS_ERROR_LENGTH - 1)}…`
+    : text;
+}
+
+/**
  * 背景定時作業。
  *
  * 工作宣告在提供它的 service 的 static jobs 上，並由那個 service 自己呼叫
@@ -44,7 +57,9 @@ export class SchedulerService extends BaseService {
     this.leaseStore =
       options.leaseStore || new MySqlJobLeaseStore({ database: this.database });
     // 租約的持有者識別。UUID 保證唯一，主機名與 pid 是給人看的。
-    this.owner = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
+    // 統計表也用它當識別，所以「誰持有租約」與「誰真的跑了」對得起來。
+    this.host = hostname();
+    this.owner = `${this.host}:${process.pid}:${randomUUID().slice(0, 8)}`;
 
     this.jobs = new Map();
     this.timers = new Map();
@@ -89,7 +104,15 @@ export class SchedulerService extends BaseService {
         skippedOverlapping: 0,
         skippedNotLeader: 0,
         timeouts: 0,
-        consecutiveFailures: 0
+        consecutiveFailures: 0,
+        // 計數器答得出「壞過幾次」，答不出「上一次是什麼時候、結果如何」，
+        // 而後者才是看到告警之後第一個要問的問題。
+        lastStartedAt: null,
+        lastFinishedAt: null,
+        lastSuccessAt: null,
+        lastOutcome: null,
+        lastDurationMs: null,
+        lastError: null
       });
 
       if (this.started && !this.stopped && this.schedulerConfig.enabled && job.enabled) {
@@ -122,6 +145,34 @@ export class SchedulerService extends BaseService {
           runOnStart
         })
     );
+  }
+
+  /**
+   * 這個實例目前的排程統計。JobStatsFlushJob 週期性地取它並發佈出去。
+   *
+   * 只包含實際會執行的工作。被停用的工作不放進來，因為「停用」與「啟用但還沒
+   * 跑過」在一列資料上長得一模一樣，而 scheduler.started／scheduler.disabled
+   * 這兩筆啟動日誌已經完整列出過工作清單了。
+   */
+  statsSnapshot() {
+    const jobs = [];
+
+    for (const job of this.jobs.values()) {
+      if (!job.enabled || !this.schedulerConfig.enabled) {
+        continue;
+      }
+
+      jobs.push(
+        Object.freeze({
+          name: job.name,
+          scope: job.scope,
+          intervalMs: job.intervalMs,
+          ...this.stats.get(job.name)
+        })
+      );
+    }
+
+    return Object.freeze({ owner: this.owner, host: this.host, jobs: Object.freeze(jobs) });
   }
 
   async start() {
@@ -212,6 +263,14 @@ export class SchedulerService extends BaseService {
       } catch (error) {
         stats.failures += 1;
         stats.consecutiveFailures += 1;
+        // 工作本身沒有跑，但這一輪確實失敗了。記成一次結果為 leaseFailed 的
+        // 嘗試，否則症狀只剩下「runs 停止增加」，看不出是資料庫的問題。
+        const at = this.time.nowMs();
+        stats.lastStartedAt = at;
+        stats.lastFinishedAt = at;
+        stats.lastDurationMs = 0;
+        stats.lastOutcome = "leaseFailed";
+        stats.lastError = describeError(error);
         void this.logger.error("scheduler.lease.failed", "Could not acquire a cluster job lease", {
           job: job.name,
           owner: this.owner,
@@ -232,6 +291,12 @@ export class SchedulerService extends BaseService {
 
     const controller = new AbortController();
     const startedAt = this.time.nowMs();
+    stats.lastStartedAt = startedAt;
+    // 進行中就是進行中：把上一輪的完成時間留在欄位裡，會讓讀的人以為那是這一
+    // 輪的結果。
+    stats.lastFinishedAt = null;
+    stats.lastDurationMs = null;
+    stats.lastOutcome = "running";
     const timeout = this.setTimer(() => {
       controller.abort(new Error(`Job "${job.name}" exceeded ${job.timeoutMs}ms`));
     }, job.timeoutMs);
@@ -242,9 +307,15 @@ export class SchedulerService extends BaseService {
         await job.run(controller.signal);
         stats.runs += 1;
         stats.consecutiveFailures = 0;
+        const finishedAt = this.time.nowMs();
+        stats.lastFinishedAt = finishedAt;
+        stats.lastSuccessAt = finishedAt;
+        stats.lastDurationMs = finishedAt - startedAt;
+        stats.lastOutcome = "succeeded";
+        stats.lastError = null;
         void this.logger.debug?.("scheduler.job.completed", "Background job completed", {
           job: job.name,
-          durationMs: this.time.nowMs() - startedAt
+          durationMs: finishedAt - startedAt
         });
       } catch (error) {
         stats.failures += 1;
@@ -254,11 +325,17 @@ export class SchedulerService extends BaseService {
           stats.timeouts += 1;
         }
 
+        const finishedAt = this.time.nowMs();
+        stats.lastFinishedAt = finishedAt;
+        stats.lastDurationMs = finishedAt - startedAt;
+        stats.lastOutcome = controller.signal.aborted ? "timedOut" : "failed";
+        stats.lastError = describeError(error);
+
         // 工作拋錯絕不能變成 unhandled rejection，也絕不能中斷排程。但連續
         // 失敗必須看得見，否則「壞了三天沒人發現」是可能的。
         void this.logger.error("scheduler.job.failed", "Background job failed", {
           job: job.name,
-          durationMs: this.time.nowMs() - startedAt,
+          durationMs: finishedAt - startedAt,
           timedOut: controller.signal.aborted,
           consecutiveFailures: stats.consecutiveFailures,
           error: { name: error.name, message: error.message }
