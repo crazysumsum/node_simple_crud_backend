@@ -178,6 +178,27 @@ export class FileLogWriter {
     return task;
   }
 
+  /**
+   * 排程驅動的清理。
+   *
+   * 清理原本只掛在 write() 上，所以一台不寫日誌的伺服器永遠不會清理——
+   * request logger 有流量才寫，system logger 更是只在啟動、錯誤與關機時才寫。
+   * 一個長期安靜、沒有錯誤的實例，過期檔案會一直留著，而 retentionDays 說好了
+   * 只留 30 天。
+   *
+   * 走同一條序列化佇列，否則會與寫入同時改到 this.target。真正是否執行仍由
+   * cleanupIfDue() 依 cleanupIntervalHours 決定，設定語意完全不變。
+   */
+  runCleanup() {
+    const task = this.queue.then(async () => {
+      await this.ready;
+      await this.cleanupIfDue();
+    });
+
+    this.queue = task.catch(() => {});
+    return task;
+  }
+
   async flush() {
     await this.ready;
     await this.queue;

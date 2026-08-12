@@ -729,13 +729,70 @@ Pushing rather than being collected keeps the Application Factory out of it enti
 It also makes the dependency real: because `scheduler` is declared, the container
 guarantees it exists before `initialize()` runs, so there is no collection-timing
 problem, and the scheduling relationship shows up in the dependency graph instead of
-being an invisible edge. Disabling the scheduler with `static service.enabled` then
-does the obvious thing — the application still starts, and any service that declared
-it as a dependency fails loudly instead of silently losing its jobs.
+being an invisible edge.
 
 The cost of pushing is that `static jobs` without a `register()` call schedules
 nothing. `scheduler.started` lists everything registered, which is where to look when
 a job does not run.
+
+### Jobs As Services
+
+When a service exists only to run one scheduled task, put it in
+`server/src/services/scheduler/jobs/`. That directory is already under
+`src/services`, so the ordinary service discovery finds it — there is no separate job
+discovery to learn. A job written that way keeps its declaration, its submission and
+its implementation in one file:
+
+```js
+export class LogRetentionJob extends BaseService {
+  static service = {
+    name: "job.logRetention",
+    lifecycle: "singleton",
+    dependencies: ["scheduler", "logging"],
+    eager: true
+  };
+
+  static jobs = [
+    { name: "logging.retentionCleanup", method: "run", intervalMs: 3600000, timeoutMs: 60000 }
+  ];
+
+  async initialize() {
+    this.services.require("scheduler").register(this);
+  }
+
+  async run() {
+    await this.services.require("logging").cleanup();
+  }
+}
+```
+
+The directory is a convention, not a rule: any service may declare `static jobs` and
+submit them. Putting one here says the service exists for that job and nothing else.
+
+Being an ordinary service also means it can be injected and run by hand —
+`services.require("job.logRetention").run()` behind an admin endpoint, for instance,
+without duplicating the work the scheduler does.
+
+Disabling the scheduler with `static service.enabled` stops such a service from
+starting, and that is deliberate: the framework has one rule for missing dependencies,
+which is to fail at startup. A process that starts is a process whose wiring is known
+to be complete.
+
+### Built-In Jobs
+
+| Job | Every | Why |
+| --- | --- | --- |
+| `logging.retentionCleanup` | 1 hour | Deletes log files past `retentionDays` |
+
+Log cleanup used to run only as a side effect of `write()`. The request logger writes
+on every request, but the system logger only writes at startup, on errors and at
+shutdown, so a long-running quiet instance with no errors kept expired files forever
+while `retentionDays` promised 30.
+
+**The write-triggered path was kept.** The job adds a second trigger rather than
+replacing the first, so a deployment without a scheduler still cleans up — it just
+needs traffic to do it. Each hourly run also still defers to the profile's own
+`cleanupIntervalHours`, so existing configuration means exactly what it did before.
 
 | Field | Meaning |
 | --- | --- |

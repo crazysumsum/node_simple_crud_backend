@@ -100,4 +100,9 @@ export class Logger {
   async flush() {
     await this.writer?.flush?.();
   }
+
+  /** 清除過期檔案。停用的 logger 沒有 writer，什麼都不用做。 */
+  async cleanup() {
+    await this.writer?.runCleanup?.();
+  }
 }
