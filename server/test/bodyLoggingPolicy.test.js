@@ -3,6 +3,7 @@ import test from "node:test";
 import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
+import { fakeDatabaseOptions } from "../test-support/fakeMySqlPool.js";
 
 // 端對端驗證 body 記錄政策：從 Handler 的 static api.logging 一路到寫出的日誌 entry。
 const employee = Object.freeze({
@@ -83,7 +84,7 @@ async function startApplication(t) {
     // 取代 request logger，直接收集 entry 而不落盤。
     requestLogger: await createCollectingRequestLogger(entries),
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+      mysqldatabase: fakeDatabaseOptions()
     },
     forceExit: () => {
       throw new Error("Body logging test must not force exit");

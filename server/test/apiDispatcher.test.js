@@ -38,7 +38,10 @@ const strategyContainer = await createServiceContainer({
   config: { jwt: jwtConfig },
   values: {
     // 策略宣告依賴 logging 以固定初始化順序，測試提供同形狀的替身。
-    logging: { logger: silentLogger }
+    logging: { logger: silentLogger },
+    // 撤銷檢查在 auth.jwt 裡，但這個檔案測的是 dispatcher 的分派與授權。
+    // 撤銷本身有自己的測試，這裡用「什麼都沒被撤銷」的替身。
+    tokenRevocation: { isRevoked: () => false, snapshotAgeSeconds: () => 0 }
   },
   discoveryOptions: {
     servicesDirectory: new URL("../src/services/auth/", import.meta.url)

@@ -29,7 +29,10 @@ const FLOORS = {
   "src/services/scheduler/normalizeJobDefinition.js": { lines: 90, branches: 78 },
   // 限流器壞掉有兩種形態：安靜地不再限流，或把佇列卡死。前者在開發時完全看
   // 不出來，後者只在有負載時才發作。
-  "src/services/requestLimiter/RequestLimiterService.js": { lines: 85, branches: 75 }
+  "src/services/requestLimiter/RequestLimiterService.js": { lines: 85, branches: 75 },
+  // 撤銷壞掉的每一種形態都是安靜的：快照沒更新、切線算錯一秒、清理刪早了，
+  // 症狀全都是「已撤銷的 token 還能用」，不會有任何錯誤浮現。
+  "src/services/tokenRevocation/TokenRevocationService.js": { lines: 90, branches: 85 }
 };
 
 const serverRoot = fileURLToPath(new URL("../", import.meta.url));

@@ -1,3 +1,5 @@
+import { describeMissingTable } from "../mysqldatabase/missingTableError.js";
+
 /**
  * scope: "cluster" 的工作在執行前必須先取得租約，確保同一輪只有一個實例執行。
  *
@@ -47,13 +49,21 @@ export class MySqlJobLeaseStore extends JobLeaseStore {
 
   async prepare(jobNames) {
     for (const jobName of jobNames) {
-      // 已存在就什麼都不做；expires_at 為 0 代表沒有人持有。
-      await this.database.execute(
-        `INSERT INTO job_leases (job_name, owner, acquired_at, expires_at)
-         VALUES (?, '', 0, 0)
-         ON DUPLICATE KEY UPDATE job_name = job_name`,
-        [jobName]
-      );
+      try {
+        // 已存在就什麼都不做；expires_at 為 0 代表沒有人持有。
+        await this.database.execute(
+          `INSERT INTO fr_job_leases (job_name, owner, acquired_at, expires_at)
+           VALUES (?, '', 0, 0)
+           ON DUPLICATE KEY UPDATE job_name = job_name`,
+          [jobName]
+        );
+      } catch (error) {
+        // prepare() 是第一個碰這張表的地方，所以缺表一定在這裡先浮現。
+        throw describeMissingTable(error, {
+          table: "fr_job_leases",
+          sqlFile: "server/database/framework/scheduler.sql"
+        });
+      }
     }
   }
 
@@ -64,7 +74,7 @@ export class MySqlJobLeaseStore extends JobLeaseStore {
       const [clock] = await transaction.query("SELECT UNIX_TIMESTAMP() AS now");
       const now = Number(clock[0].now);
       const [rows] = await transaction.query(
-        "SELECT owner, expires_at FROM job_leases WHERE job_name = ? FOR UPDATE",
+        "SELECT owner, expires_at FROM fr_job_leases WHERE job_name = ? FOR UPDATE",
         [jobName]
       );
       const existing = rows[0];
@@ -80,7 +90,7 @@ export class MySqlJobLeaseStore extends JobLeaseStore {
       }
 
       await transaction.execute(
-        "UPDATE job_leases SET owner = ?, acquired_at = ?, expires_at = ? WHERE job_name = ?",
+        "UPDATE fr_job_leases SET owner = ?, acquired_at = ?, expires_at = ? WHERE job_name = ?",
         [owner, now, now + leaseSeconds, jobName]
       );
       return true;
@@ -90,7 +100,7 @@ export class MySqlJobLeaseStore extends JobLeaseStore {
   async release(jobName, owner) {
     // 只釋放自己持有的。租約若已經過期並被別人接手，這裡不能把它踢掉。
     await this.database.execute(
-      "UPDATE job_leases SET expires_at = 0 WHERE job_name = ? AND owner = ?",
+      "UPDATE fr_job_leases SET expires_at = 0 WHERE job_name = ? AND owner = ?",
       [jobName, owner]
     );
   }

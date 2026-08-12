@@ -21,7 +21,9 @@ test("global configuration validation normalizes every configuration section", (
     // 限流器是一個 service，所以它的設定自己一個區塊、自己一個檔案。
     "requestLimiter",
     "scheduler",
-    "security"
+    "security",
+    // 撤銷也是一個 service，所以設定自己一個區塊、自己一個檔案。
+    "tokenRevocation"
   ]);
   assert.equal(configuration.application.timeZone, "Asia/Hong_Kong");
   assert.equal(configuration.application.requestTimeoutMs, 30000);

@@ -12,7 +12,10 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      # 編號決定執行順序：init.sql 先建庫與帳號，框架的表才建得起來。
       - ./server/database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./server/database/framework/scheduler.sql:/docker-entrypoint-initdb.d/02-scheduler.sql:ro
+      - ./server/database/framework/jwt.sql:/docker-entrypoint-initdb.d/03-jwt.sql:ro
 
   adminer:
     image: adminer:4

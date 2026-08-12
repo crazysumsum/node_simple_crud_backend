@@ -7,6 +7,7 @@ import requestConfig from "../../../config/request.js";
 import requestLimiterConfig from "../../../config/requestLimiter.js";
 import schedulerConfig from "../../../config/scheduler.js";
 import securityConfig from "../../../config/security.js";
+import tokenRevocationConfig from "../../../config/tokenRevocation.js";
 import { normalizeLoggingConfig } from "../../services/logging/normalizeLoggingConfig.js";
 import { normalizeSecurityConfig } from "../security/normalizeSecurityConfig.js";
 import { normalizeApiConfig } from "../api/normalizeApiConfig.js";
@@ -17,6 +18,7 @@ import { normalizeJwtConfig } from "./normalizeJwtConfig.js";
 import { normalizeRequestConfig } from "./normalizeRequestConfig.js";
 import { normalizeRequestLimiterConfig } from "../../services/requestLimiter/normalizeRequestLimiterConfig.js";
 import { normalizeSchedulerConfig } from "../../services/scheduler/normalizeSchedulerConfig.js";
+import { normalizeTokenRevocationConfig } from "../../services/tokenRevocation/normalizeTokenRevocationConfig.js";
 
 export function defaultConfigurationSource() {
   return {
@@ -28,7 +30,8 @@ export function defaultConfigurationSource() {
     request: requestConfig,
     requestLimiter: requestLimiterConfig,
     scheduler: schedulerConfig,
-    security: securityConfig
+    security: securityConfig,
+    tokenRevocation: tokenRevocationConfig
   };
 }
 
@@ -61,6 +64,9 @@ export function validateApplicationConfiguration(
   );
   validateSection("scheduler", () => normalizeSchedulerConfig(source?.scheduler));
   validateSection("security", () => normalizeSecurityConfig(source?.security));
+  validateSection("tokenRevocation", () =>
+    normalizeTokenRevocationConfig(source?.tokenRevocation)
+  );
 
   if (details.length > 0) {
     throw new ConfigurationError(details);

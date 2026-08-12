@@ -3,6 +3,7 @@ import test from "node:test";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
 import { MemoryRateLimitStore } from "../src/services/requestLimiter/RateLimitStore.js";
+import { fakeMySqlPool } from "../test-support/fakeMySqlPool.js";
 import { MemoryIdempotencyStore } from "../src/framework/idempotency/IdempotencyStore.js";
 
 // 關閉流程的逾時與失敗分支先前完全沒有測試，而它們正是 closeWithTimeout 的
@@ -35,7 +36,7 @@ async function startApplication(
     requestLogger: (_req, _res, next) => next(),
     idempotencyStore,
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: poolEnd } },
+      mysqldatabase: { pool: fakeMySqlPool({ end: poolEnd }) },
       requestLimiter: { store: rateLimitStore }
     },
     // 逾時情境下框架會呼叫 forceExit，記錄而不是真的結束測試程序。
@@ -92,7 +93,7 @@ test("a failing rate limit store is named in the shutdown log", async () => {
     },
     requestLogger: (_req, _res, next) => next(),
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } },
+      mysqldatabase: { pool: fakeMySqlPool() },
       requestLimiter: { store: rateLimitStore }
     },
     forceExit: () => {}
