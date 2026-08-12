@@ -20,7 +20,10 @@ const silentLogger = {
   flush: async () => {}
 };
 
-async function startApplication(t, { rateLimitStore, idempotencyStore, shutdownTimeoutMs = 1000 }) {
+async function startApplication(
+  t,
+  { rateLimitStore, idempotencyStore, poolEnd = async () => {}, shutdownTimeoutMs = 1000 }
+) {
   const source = defaultConfigurationSource();
   const forcedExits = [];
   const application = await createApplication({
@@ -32,7 +35,7 @@ async function startApplication(t, { rateLimitStore, idempotencyStore, shutdownT
     requestLogger: (_req, _res, next) => next(),
     idempotencyStore,
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } },
+      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: poolEnd } },
       requestLimiter: { store: rateLimitStore }
     },
     // 逾時情境下框架會呼叫 forceExit，記錄而不是真的結束測試程序。
@@ -107,6 +110,17 @@ test("shutdown gives up on a store whose close never settles", async (t) => {
   // 永不 resolve：沒有逾時保護的話，關閉流程會永遠停在這裡。
   rateLimitStore.close = () => new Promise(() => {});
 
+  // 資料庫也一起卡住，而且這是必要的，不是為了多測一個資源。
+  //
+  // 容器的 timeoutMs 是「每個 service 各一份」，而 Factory 傳給它的是當下剩餘
+  // 的全部預算。只卡一個 service 的話，容器的 withTimeout 會與強制結束計時器
+  // 在同一毫秒到期——兩者在 Node 內部屬於不同的 duration 清單，誰先觸發是擲
+  // 硬幣。卡兩個就要花掉大約兩倍預算，超時因此是確定的。
+  //
+  // 這也順帶記錄一個既有行為：關機總時長的上界是「卡住的 service 數 × 預算」，
+  // 而不是預算本身。強制結束計時器就是為這件事存在的。
+  const poolEnd = () => new Promise(() => {});
+
   // 逾時之後的每一步預算都只剩 1ms，而 MemoryIdempotencyStore.close() 是純
   // microtask。兩者相加會讓整段收尾在同一次 microtask drain 裡跑完，搶在同
   // 一毫秒到期的強制結束計時器之前執行 clearTimeout——測試就變成擲硬幣。
@@ -120,6 +134,7 @@ test("shutdown gives up on a store whose close never settles", async (t) => {
   const { application, forcedExits } = await startApplication(t, {
     rateLimitStore,
     idempotencyStore,
+    poolEnd,
     shutdownTimeoutMs: 300
   });
   const startedAt = Date.now();
