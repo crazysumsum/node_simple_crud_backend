@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { MemoryRateLimitStore } from "../src/framework/limiting/RateLimitStore.js";
+import { MemoryRateLimitStore } from "../src/services/requestLimiter/RateLimitStore.js";
 import {
   markRequestProcessingCompleted,
   markRequestProcessingStarted
 } from "../src/framework/http/requestProcessingLifecycle.js";
-import { RequestLimiter } from "../src/framework/middleware/requestLimiter.js";
+import { RequestLimiterService } from "../src/services/requestLimiter/RequestLimiterService.js";
 import { createTestTime } from "../test-support/createTestTime.js";
 
 const baseConfig = {
-  enabled: true,
   apiPathPrefix: "/api",
   maxConcurrentRequests: 1,
   maxQueueSize: 1,
@@ -85,7 +84,7 @@ test("request limiter processes queued requests in FIFO order and rejects a full
   let now = 1000;
   const logger = memoryLogger();
   const time = createTestTime({ clock: () => new Date(now) });
-  const limiter = new RequestLimiter({ config: baseConfig, logger, time });
+  const limiter = new RequestLimiterService({ config: baseConfig, logger, time });
   const started = [];
   const firstResponse = new MockResponse();
   const secondResponse = new MockResponse();
@@ -123,7 +122,7 @@ test("request limiter rejects an IP that exceeds the sliding window", async () =
   let now = 0;
   const logger = memoryLogger();
   const time = createTestTime({ clock: () => new Date(now) });
-  const limiter = new RequestLimiter({
+  const limiter = new RequestLimiterService({
     config: {
       ...baseConfig,
       maxConcurrentRequests: 10,
@@ -163,7 +162,7 @@ test("request limiter rejects an IP that exceeds the sliding window", async () =
 test("request limiter rejects a queued request after its wait timeout", async () => {
   const logger = memoryLogger();
   const time = createTestTime();
-  const limiter = new RequestLimiter({
+  const limiter = new RequestLimiterService({
     config: { ...baseConfig, queueTimeoutMs: 10 },
     logger,
     time
@@ -189,7 +188,7 @@ test("request limiter rejects a queued request after its wait timeout", async ()
 
 test("request limiter rejects queued and new requests during graceful shutdown", async () => {
   const logger = memoryLogger();
-  const limiter = new RequestLimiter({ config: baseConfig, logger, time: createTestTime() });
+  const limiter = new RequestLimiterService({ config: baseConfig, logger, time: createTestTime() });
   const activeResponse = new MockResponse();
   const queuedResponse = new MockResponse();
 
@@ -199,7 +198,7 @@ test("request limiter rejects queued and new requests during graceful shutdown",
   });
 
   const idle = limiter.waitForIdle(1000);
-  const rejectedQueuedRequests = limiter.shutdown();
+  const rejectedQueuedRequests = limiter.stopAccepting();
   assert.equal(rejectedQueuedRequests, 1);
   assert.equal(queuedResponse.statusCode, 503);
   assert.equal(queuedResponse.body.error.code, "SERVICE_UNAVAILABLE");
@@ -223,13 +222,13 @@ test("request limiter instances share IP quotas through an injected store", asyn
     maxConcurrentRequests: 10,
     maxRequestsPerIpPerWindow: 2
   };
-  const firstInstance = new RequestLimiter({
+  const firstInstance = new RequestLimiterService({
     config,
     logger: memoryLogger(),
     time,
     store
   });
-  const secondInstance = new RequestLimiter({
+  const secondInstance = new RequestLimiterService({
     config,
     logger: memoryLogger(),
     time,
@@ -255,7 +254,7 @@ test("request limiter instances share IP quotas through an injected store", asyn
 });
 
 test("request limiter keeps a slot until timed-out processing actually completes", async () => {
-  const limiter = new RequestLimiter({
+  const limiter = new RequestLimiterService({
     config: baseConfig,
     logger: memoryLogger(),
     time: createTestTime()
@@ -283,4 +282,108 @@ test("request limiter keeps a slot until timed-out processing actually completes
 
   assert.deepEqual(started, ["first", "second"]);
   assert.equal(limiter.activeRequests, 0);
+});
+
+// --- service 生命週期 --------------------------------------------------------
+
+test("stopAccepting and shutdown are separate, so the store is actually closed", async () => {
+  const limiter = new RequestLimiterService({
+    config: baseConfig,
+    logger: memoryLogger(),
+    time: createTestTime()
+  });
+  let storeClosed = 0;
+  limiter.store.close = async () => {
+    storeClosed += 1;
+  };
+
+  // 容器只呼叫 shutdown||close 其中一個。兩者同名的話，Factory 先呼叫的那個會
+  // 勝出，store 就永遠關不掉——memory 無感，共享 adapter 是洩一條連線。
+  assert.equal(typeof limiter.shutdown, "function");
+  const containerLifecycleMethod = limiter.shutdown || limiter.close;
+  assert.equal(containerLifecycleMethod, limiter.shutdown);
+
+  limiter.stopAccepting();
+  assert.equal(storeClosed, 0, "停收不等於關閉");
+
+  await containerLifecycleMethod.call(limiter);
+  assert.equal(storeClosed, 1);
+});
+
+test("shutdown covers stopAccepting and stays idempotent", async () => {
+  const logger = memoryLogger();
+  const limiter = new RequestLimiterService({
+    config: baseConfig,
+    logger,
+    time: createTestTime()
+  });
+  let storeClosed = 0;
+  limiter.store.close = async () => {
+    storeClosed += 1;
+  };
+
+  const activeResponse = new MockResponse();
+  const queuedResponse = new MockResponse();
+  await limiter.handle(request("active"), activeResponse, () => {});
+  await limiter.handle(request("queued"), queuedResponse, () => {
+    throw new Error("Queued request must not start during shutdown");
+  });
+
+  // 不經 Factory 直接用容器時，最壞只是排隊拒得晚，而不是 store 洩漏。
+  await limiter.shutdown();
+  assert.equal(queuedResponse.statusCode, 503);
+  assert.equal(storeClosed, 1);
+
+  // Factory 已經呼叫過 stopAccepting()，容器之後還會呼叫一次 shutdown()。
+  await limiter.shutdown();
+  assert.equal(storeClosed, 1);
+  assert.equal(
+    logger.entries.filter(({ event }) => event === "request.limit.shutdown").length,
+    1,
+    "重複關閉不該重複記錄"
+  );
+
+  activeResponse.finish();
+});
+
+test("the managed constructor reads its own configuration section", () => {
+  const logger = memoryLogger();
+  const time = createTestTime();
+  const services = {
+    require: (name) => ({ logging: { logger }, time })[name]
+  };
+  const limiter = new RequestLimiterService({
+    config: { requestLimiter: { ...baseConfig, maxConcurrentRequests: 7 } },
+    services
+  });
+
+  // 設定自己一個區塊、自己一個檔案；service 不再從 request.limits 底下撈。
+  assert.equal(limiter.config.maxConcurrentRequests, 7);
+  assert.equal(limiter.logger, logger);
+  assert.equal(limiter.time, time);
+});
+
+test("a non-memory adapter without an injected store fails to construct", () => {
+  const services = {
+    require: (name) => ({ logging: { logger: memoryLogger() }, time: createTestTime() })[name]
+  };
+
+  // 不擋的話設定會靜默退回 memory，多實例部署各自算各自的配額——一個看不出來
+  // 的限流失效。
+  assert.throws(
+    () =>
+      new RequestLimiterService({
+        config: { requestLimiter: { ...baseConfig, storeAdapter: "redis" } },
+        services
+      }),
+    /RateLimitStore adapter must be injected for redis/
+  );
+
+  const store = new MemoryRateLimitStore();
+  const limiter = new RequestLimiterService({
+    config: { requestLimiter: { ...baseConfig, storeAdapter: "redis" } },
+    services,
+    options: { store }
+  });
+  assert.equal(limiter.store, store);
 });

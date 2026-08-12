@@ -206,14 +206,11 @@ test("responses that short-circuit the request still carry CORS headers", async 
     configurationSource: {
       ...source,
       application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 },
-      request: {
-        ...source.request,
-        // 一個窗口只允許一次請求，第二次必定被限流。
-        limits: {
-          ...source.request.limits,
-          maxRequestsPerIpPerWindow: 1,
-          ipWindowMs: 60000
-        }
+      // 一個窗口只允許一次請求，第二次必定被限流。
+      requestLimiter: {
+        ...source.requestLimiter,
+        maxRequestsPerIpPerWindow: 1,
+        ipWindowMs: 60000
       }
     },
     logger: memoryLogger(),

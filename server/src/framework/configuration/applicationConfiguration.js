@@ -4,6 +4,7 @@ import databaseConfig from "../../../config/database.js";
 import jwtConfig from "../../../config/jwt.js";
 import loggingConfig from "../../../config/logging.js";
 import requestConfig from "../../../config/request.js";
+import requestLimiterConfig from "../../../config/requestLimiter.js";
 import schedulerConfig from "../../../config/scheduler.js";
 import securityConfig from "../../../config/security.js";
 import { normalizeLoggingConfig } from "../../services/logging/normalizeLoggingConfig.js";
@@ -14,6 +15,7 @@ import { normalizeApplicationConfig } from "./normalizeApplicationConfig.js";
 import { normalizeDatabaseConfig } from "./normalizeDatabaseConfig.js";
 import { normalizeJwtConfig } from "./normalizeJwtConfig.js";
 import { normalizeRequestConfig } from "./normalizeRequestConfig.js";
+import { normalizeRequestLimiterConfig } from "../../services/requestLimiter/normalizeRequestLimiterConfig.js";
 import { normalizeSchedulerConfig } from "../../services/scheduler/normalizeSchedulerConfig.js";
 
 export function defaultConfigurationSource() {
@@ -24,6 +26,7 @@ export function defaultConfigurationSource() {
     jwt: jwtConfig,
     logging: loggingConfig,
     request: requestConfig,
+    requestLimiter: requestLimiterConfig,
     scheduler: schedulerConfig,
     security: securityConfig
   };
@@ -52,6 +55,9 @@ export function validateApplicationConfiguration(
   validateSection("logging", () => normalizeLoggingConfig(source?.logging));
   validateSection("request", () =>
     normalizeRequestConfig(source?.request, { environment })
+  );
+  validateSection("requestLimiter", () =>
+    normalizeRequestLimiterConfig(source?.requestLimiter)
   );
   validateSection("scheduler", () => normalizeSchedulerConfig(source?.scheduler));
   validateSection("security", () => normalizeSecurityConfig(source?.security));

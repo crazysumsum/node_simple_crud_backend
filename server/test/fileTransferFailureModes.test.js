@@ -132,10 +132,7 @@ async function startApplication(t, { limits } = {}) {
     configurationSource: {
       ...source,
       application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 },
-      request: {
-        ...source.request,
-        limits: { ...source.request.limits, ...limits }
-      }
+      requestLimiter: { ...source.requestLimiter, ...limits }
     },
     handlerRegistryOptions: {
       moduleUrls: ["virtual:fileTransferFailureModes"],

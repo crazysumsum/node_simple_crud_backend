@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
-import { MemoryRateLimitStore } from "../src/framework/limiting/RateLimitStore.js";
+import { MemoryRateLimitStore } from "../src/services/requestLimiter/RateLimitStore.js";
 import { MemoryIdempotencyStore } from "../src/framework/idempotency/IdempotencyStore.js";
 
 // 關閉流程的逾時與失敗分支先前完全沒有測試，而它們正是 closeWithTimeout 的
 // 存在理由：任何一個資源關不掉都不能讓程序永遠掛著，且必須反映在 exitCode。
+//
+// 限流 store 現在由容器關閉（限流器是一個 service），所以它的失敗出現在
+// serviceFailures 裡而不是一個專屬欄位——idempotency store 仍走 Factory 自己的
+// closeResource，兩條路都要測到。
 
 const silentLogger = {
   debug: async () => {},
@@ -26,10 +30,10 @@ async function startApplication(t, { rateLimitStore, idempotencyStore, shutdownT
     },
     logger: silentLogger,
     requestLogger: (_req, _res, next) => next(),
-    rateLimitStore,
     idempotencyStore,
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } },
+      requestLimiter: { store: rateLimitStore }
     },
     // 逾時情境下框架會呼叫 forceExit，記錄而不是真的結束測試程序。
     forceExit: (code) => forcedExits.push(code)
@@ -53,13 +57,49 @@ test("shutdown reports a store that fails to close and fails the exit code", asy
   const { application } = await startApplication(t, { rateLimitStore, idempotencyStore });
   const result = await application.shutdown("test_complete");
 
-  assert.equal(result.rateLimitStoreClosed, false);
   assert.equal(result.idempotencyStoreClosed, false);
+  // 限流 store 關不掉會被記成 requestLimiter 這個 service 關閉失敗。
+  assert.equal(result.servicesClosed, false);
   // 其他資源仍然正常關閉，失敗不會中斷剩餘流程。
   assert.equal(result.httpServerClosed, true);
-  assert.equal(result.servicesClosed, true);
   assert.equal(result.exitCode, 1);
   assert.equal(application.state, "stopped");
+});
+
+test("a failing rate limit store is named in the shutdown log", async () => {
+  const failures = [];
+  const rateLimitStore = new MemoryRateLimitStore();
+  rateLimitStore.close = async () => {
+    throw new Error("rate limit store is unreachable");
+  };
+
+  const source = defaultConfigurationSource();
+  const application = await createApplication({
+    configurationSource: {
+      ...source,
+      application: { ...source.application, port: 0, shutdownTimeoutMs: 1000 }
+    },
+    logger: {
+      ...silentLogger,
+      info: async (event, _message, context) => {
+        if (event === "application.shutdown.completed") {
+          failures.push(...context.serviceFailures);
+        }
+      }
+    },
+    requestLogger: (_req, _res, next) => next(),
+    serviceOptions: {
+      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } },
+      requestLimiter: { store: rateLimitStore }
+    },
+    forceExit: () => {}
+  });
+  await application.start();
+  await application.shutdown("test_complete");
+
+  // 刪掉 rateLimitStoreClosed 這個專屬欄位之後，「是哪一個資源關不掉」必須仍然
+  // 看得出來，否則等於把一個具名的失敗降級成一個布林值。
+  assert.deepEqual(failures, ["requestLimiter"]);
 });
 
 test("shutdown gives up on a store whose close never settles", async (t) => {
@@ -86,7 +126,7 @@ test("shutdown gives up on a store whose close never settles", async (t) => {
   const result = await application.shutdown("test_complete");
   const elapsedMs = Date.now() - startedAt;
 
-  assert.equal(result.rateLimitStoreClosed, false);
+  assert.equal(result.servicesClosed, false);
   assert.equal(result.exitCode, 1);
   assert.equal(application.state, "stopped");
   // 必須在 shutdown 期限附近放棄，而不是無限等待。
@@ -102,9 +142,9 @@ test("shutdown closes cleanly when every resource cooperates", async (t) => {
   });
   const result = await application.shutdown("test_complete");
 
-  assert.equal(result.rateLimitStoreClosed, true);
   assert.equal(result.idempotencyStoreClosed, true);
   assert.equal(result.httpServerClosed, true);
+  assert.equal(result.servicesClosed, true);
   assert.equal(result.exitCode, 0);
   assert.deepEqual(forcedExits, []);
 });

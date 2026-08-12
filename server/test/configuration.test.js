@@ -18,6 +18,8 @@ test("global configuration validation normalizes every configuration section", (
     "jwt",
     "logging",
     "request",
+    // 限流器是一個 service，所以它的設定自己一個區塊、自己一個檔案。
+    "requestLimiter",
     "scheduler",
     "security"
   ]);
@@ -32,7 +34,7 @@ test("global configuration validation normalizes every configuration section", (
   assert.equal(configuration.logging.loggers.request.minimumLevel, "info");
   assert.equal(configuration.logging.loggers.system.filePrefix, "system");
   assert.equal(configuration.logging.loggers.system.minimumLevel, "info");
-  assert.equal(configuration.request.limits.maxConcurrentRequests, 100);
+  assert.equal(configuration.requestLimiter.maxConcurrentRequests, 100);
   assert.equal(configuration.request.validation.input.enabled, true);
   assert.equal(configuration.request.validation.output.runtimeEnabled, true);
   assert.equal(Object.isFrozen(configuration), true);
@@ -120,10 +122,7 @@ test("global configuration validation reports errors from multiple sections", ()
       defaults: { ...source.api.defaults, timeoutMs: 0 }
     },
     database: { ...source.database, connectionLimit: 0 },
-    request: {
-      ...source.request,
-      limits: { ...source.request.limits, maxQueueSize: -1 }
-    }
+    requestLimiter: { ...source.requestLimiter, maxQueueSize: -1 }
   };
 
   assert.throws(
@@ -133,7 +132,7 @@ test("global configuration validation reports errors from multiple sections", ()
       assert.equal(error.code, "CONFIGURATION_INVALID");
       assert.deepEqual(
         error.details.map(({ section }) => section),
-        ["application", "api", "database", "request"]
+        ["application", "api", "database", "requestLimiter"]
       );
       return true;
     }

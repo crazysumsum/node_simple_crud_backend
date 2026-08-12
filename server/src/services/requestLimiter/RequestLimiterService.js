@@ -1,16 +1,12 @@
-import requestConfig from "../../../config/request.js";
-import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
-import { sendError } from "../http/apiResponse.js";
+import { reportInternalFailure } from "../../framework/diagnostics/reportInternalFailure.js";
+import { sendError } from "../../framework/http/apiResponse.js";
 import {
   markRequestProcessingCompleted,
   markRequestResponseEnded,
   onRequestProcessingComplete
-} from "../http/requestProcessingLifecycle.js";
-import { normalizeRequestLimitsConfig } from "../limiting/normalizeRequestLimitsConfig.js";
-import {
-  MemoryRateLimitStore,
-  RateLimitStore
-} from "../limiting/RateLimitStore.js";
+} from "../../framework/http/requestProcessingLifecycle.js";
+import { normalizeRequestLimiterConfig } from "./normalizeRequestLimiterConfig.js";
+import { MemoryRateLimitStore, RateLimitStore } from "./RateLimitStore.js";
 
 const TOO_MANY_REQUESTS = "Too Many Requests";
 
@@ -18,42 +14,84 @@ function requestPath(req) {
   return req.path || String(req.originalUrl || req.url || "").split("?")[0];
 }
 
-export class RequestLimiter {
-  constructor({
-    config = requestConfig.limits,
-    logger,
-    time,
-    store
-  } = {}) {
-    this.config = normalizeRequestLimitsConfig(config);
-    this.logger = logger;
-    this.time = time;
+/**
+ * 系統層請求限流：IP 滑動窗口、並行上限、以及滿載時的 FIFO 佇列。
+ *
+ * 中間件是這個 service 的產出，不是它的替代品——狀態（activeRequests、queue、
+ * store、idleWaiters）由 service 持有，middleware() 只是一個閉包。LoggingService
+ * 的 requestMiddleware 已經是同一個形狀。
+ *
+ * 框架不要求它存在：Factory 用 services.get() 取，停用之後應用照常啟動，只是
+ * 不掛限流中間件。這是它與排程器同屬的那一類——框架安排它的生命週期先後，但
+ * 不依賴它。
+ *
+ * 關機有三個必須分開的時刻，而容器只給一個：
+ *   1. stopAccepting()  停收、拒絕排隊——必須在 HTTP server 關閉之前
+ *   2. waitForIdle()    排空在途請求——必須在任何 service 被拆掉之前
+ *   3. shutdown()       關閉限流 store——必須在排空之後
+ * 前兩步由 Factory 編排，第三步是容器認得的那個名字。shutdown() 冪等，且會補
+ * 做第 1 步，讓「不經 Factory 直接用容器」最壞只是排隊拒得晚，而不是 store 洩漏。
+ */
+export class RequestLimiterService {
+  static service = Object.freeze({
+    name: "requestLimiter",
+    lifecycle: "singleton",
+    dependencies: ["logging", "time"],
+    // eager 是承重的：Factory 用 services.get() 取，而 get() 只回傳已建立的
+    // 實例。改成 lazy 會讓限流器靜默地不掛載——比啟動失敗糟得多。
+    eager: true
+  });
+
+  constructor({ config, logger, time, store, services, options = {} } = {}) {
+    const managed = services && typeof services.require === "function";
+
+    this.config = normalizeRequestLimiterConfig(
+      managed ? config?.requestLimiter : config
+    );
+    this.logger = managed ? services.require("logging").logger : logger;
+    this.time = managed ? services.require("time") : time;
 
     if (
-      !logger ||
+      !this.logger ||
       ["debug", "info", "warn", "error"].some(
-        (method) => typeof logger[method] !== "function"
+        (method) => typeof this.logger[method] !== "function"
       )
     ) {
-      throw new TypeError("RequestLimiter requires a system logger");
+      throw new TypeError("RequestLimiterService requires a system logger");
     }
 
-    if (!time || typeof time.nowMs !== "function" || typeof time.timestamp !== "function") {
-      throw new TypeError("RequestLimiter requires a time service");
+    if (
+      !this.time ||
+      typeof this.time.nowMs !== "function" ||
+      typeof this.time.timestamp !== "function"
+    ) {
+      throw new TypeError("RequestLimiterService requires a time service");
     }
 
-    this.store = store || new MemoryRateLimitStore({ now: () => time.nowMs() });
+    const injectedStore = store || options.store || null;
+
+    // 非 memory 的 adapter 沒有內建實作。不在這裡擋，設定會靜默退回 memory，
+    // 於是多實例部署各自算各自的配額——一個看不出來的限流失效。
+    if (!injectedStore && this.config.storeAdapter !== "memory") {
+      throw new Error(
+        `RateLimitStore adapter must be injected for ${this.config.storeAdapter}`
+      );
+    }
+
+    this.store =
+      injectedStore || new MemoryRateLimitStore({ now: () => this.time.nowMs() });
 
     if (
       !(this.store instanceof RateLimitStore) &&
       typeof this.store.consume !== "function"
     ) {
-      throw new TypeError("RequestLimiter store must implement consume()");
+      throw new TypeError("RequestLimiterService store must implement consume()");
     }
 
     this.activeRequests = 0;
     this.queue = [];
     this.shuttingDown = false;
+    this.closed = false;
     this.idleWaiters = new Set();
   }
 
@@ -64,7 +102,7 @@ export class RequestLimiter {
   }
 
   async handle(req, res, next) {
-    if (!this.config.enabled || !this.isLimitedPath(req)) {
+    if (!this.isLimitedPath(req)) {
       next();
       return;
     }
@@ -327,7 +365,17 @@ export class RequestLimiter {
     });
   }
 
-  shutdown() {
+  /**
+   * 停止接受新請求並拒絕所有排隊中的請求，回傳被拒絕的筆數。
+   *
+   * 這不是關機——在途請求還在跑，store 也還開著。名字刻意與 shutdown() 分開：
+   * 容器只會呼叫 shutdown||close 其中一個，兩者同名會讓 store 永遠關不掉。
+   */
+  stopAccepting() {
+    if (this.shuttingDown) {
+      return 0;
+    }
+
     this.shuttingDown = true;
     const queuedTickets = this.queue.splice(0);
 
@@ -350,7 +398,23 @@ export class RequestLimiter {
     return queuedTickets.length;
   }
 
-  async close() {
+  /** 清除過期的限流記錄。由 RateLimitPurgeJob 排程，也可以手動觸發。 */
+  async purge() {
+    return (
+      (await this.store.purge?.({
+        before: this.time.nowMs() - this.config.ipWindowMs
+      })) ?? 0
+    );
+  }
+
+  /** 容器認得的關閉方法。冪等，且會補做 stopAccepting()。 */
+  async shutdown() {
+    if (this.closed) {
+      return;
+    }
+
+    this.closed = true;
+    this.stopAccepting();
     await this.store.close?.();
   }
 
@@ -392,9 +456,4 @@ export class RequestLimiter {
       });
     });
   }
-}
-
-export function createRequestLimiter(options) {
-  const limiter = new RequestLimiter(options);
-  return limiter.middleware();
 }

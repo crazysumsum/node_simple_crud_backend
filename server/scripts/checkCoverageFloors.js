@@ -26,7 +26,10 @@ const FLOORS = {
   // 兩者都不會在開發時被發現。
   "src/services/scheduler/SchedulerService.js": { lines: 90, branches: 85 },
   "src/services/scheduler/JobLeaseStore.js": { lines: 95, branches: 95 },
-  "src/services/scheduler/normalizeJobDefinition.js": { lines: 90, branches: 78 }
+  "src/services/scheduler/normalizeJobDefinition.js": { lines: 90, branches: 78 },
+  // 限流器壞掉有兩種形態：安靜地不再限流，或把佇列卡死。前者在開發時完全看
+  // 不出來，後者只在有負載時才發作。
+  "src/services/requestLimiter/RequestLimiterService.js": { lines: 85, branches: 75 }
 };
 
 const serverRoot = fileURLToPath(new URL("../", import.meta.url));
