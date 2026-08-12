@@ -208,6 +208,10 @@ test("the configuration rejects values that would silently weaken idempotency", 
     () => normalizeIdempotencyConfig({ ...base, maxResponseBytes: -1 }),
     /"maxResponseBytes" must be a positive integer/
   );
+  assert.throws(
+    () => normalizeIdempotencyConfig({ ...base, purgeMaxBatches: 0 }),
+    /"purgeMaxBatches" must be a positive integer/
+  );
 
   const defaults = normalizeIdempotencyConfig({
     headerName: "Idempotency-Key",
@@ -217,4 +221,76 @@ test("the configuration rejects values that would silently weaken idempotency", 
   assert.equal(defaults.storeAdapter, "mysql");
   assert.equal(defaults.defaultTtlMs, 3600000);
   assert.equal(defaults.pendingLeaseMs, 120000);
+  assert.equal(defaults.purgeMaxBatches, 50);
+});
+
+// --- 落後訊號 ------------------------------------------------------------------
+
+async function purgeThrough(storePurgeResult) {
+  const { IdempotencyService } = await import(
+    "../src/services/idempotency/IdempotencyService.js"
+  );
+  const { normalizeIdempotencyConfig } = await import(
+    "../src/services/idempotency/normalizeIdempotencyConfig.js"
+  );
+  const entries = [];
+  const record = (level) => async (event, message, context) =>
+    entries.push({ level, event, context });
+  const service = new IdempotencyService({
+    config: normalizeIdempotencyConfig({
+      headerName: "Idempotency-Key",
+      cacheableStatusCodes: [200],
+      storeKeyPrefix: "test",
+      storeAdapter: "memory",
+      purgeMaxBatches: 7
+    }),
+    store: {
+      begin: async () => ({ state: "started" }),
+      complete: async () => {},
+      fail: async () => {},
+      purge: async () => storePurgeResult
+    },
+    logger: { info: record("info"), warn: record("warn"), error: record("error") },
+    context: { get: () => ({}) }
+  });
+
+  const removed = await service.purge();
+  return { removed, entries };
+}
+
+test("a purge that hits its batch limit warns that cleanup is falling behind", async () => {
+  const { removed, entries } = await purgeThrough({ removed: 7000, exhausted: true });
+
+  assert.equal(removed, 7000);
+
+  // 沒有這一筆的話，「清理追不上」完全沒有徵兆：過期判斷是逐筆做的，所以
+  // 行為一切正常，只有表在單調成長。
+  const warning = entries.find(
+    ({ event }) => event === "idempotency.purge_incomplete"
+  );
+  assert.equal(warning.level, "warn");
+  assert.equal(warning.context.purgeMaxBatches, 7);
+  assert.equal(warning.context.removedRecords, 7000);
+  assert.match(warning.context.remedy, /purgeMaxBatches/);
+});
+
+test("a purge that finishes its work does not warn", async () => {
+  const { entries } = await purgeThrough({ removed: 12, exhausted: false });
+
+  assert.equal(
+    entries.some(({ event }) => event === "idempotency.purge_incomplete"),
+    false
+  );
+  assert.equal(
+    entries.find(({ event }) => event === "idempotency.purged").context.removedRecords,
+    12
+  );
+});
+
+test("an adapter with nothing to purge neither logs nor throws", async () => {
+  // memory adapter 繼承基底的 no-op：它有自己的節流掃描，也沒有共享表。
+  const { removed, entries } = await purgeThrough({ removed: 0, exhausted: false });
+
+  assert.equal(removed, 0);
+  assert.deepEqual(entries, []);
 });

@@ -3,10 +3,10 @@ import { IdempotencyStore } from "./IdempotencyStore.js";
 
 const TABLE = "fr_idempotency_keys";
 const SQL_FILE = "server/database/framework/idempotency.sql";
-// 一次 DELETE 掃掉數百萬列會長時間持有鎖。分批刪，並限制每輪的批次數，讓清理
-// 工作永遠在自己的 timeoutMs 內結束。
+// 一次 DELETE 掃掉數百萬列會長時間持有鎖，所以分批刪。批次大小是「單次 DELETE
+// 不要鎖太久」的取捨，與部署規模無關，所以是常數；每輪能刪幾批則取決於流量，
+// 由 purgeMaxBatches 設定。
 const PURGE_BATCH_SIZE = 1000;
-const PURGE_MAX_BATCHES = 50;
 
 /**
  * 共享的 idempotency store。
@@ -28,7 +28,12 @@ const PURGE_MAX_BATCHES = 50;
  * 快樂路徑一句 SQL、無交易、無間隙鎖。
  */
 export class MySqlIdempotencyStore extends IdempotencyStore {
-  constructor({ database, time, maxResponseBytes = 1048576 } = {}) {
+  constructor({
+    database,
+    time,
+    maxResponseBytes = 1048576,
+    purgeMaxBatches = 50
+  } = {}) {
     super();
 
     if (!database || typeof database.execute !== "function") {
@@ -42,6 +47,7 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
     this.database = database;
     this.time = time;
     this.maxResponseBytes = maxResponseBytes;
+    this.purgeMaxBatches = purgeMaxBatches;
   }
 
   async begin(key, { fingerprint, ttlMs, pendingLeaseMs = ttlMs }) {
@@ -163,7 +169,7 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
   async purge() {
     let removed = 0;
 
-    for (let batch = 0; batch < PURGE_MAX_BATCHES; batch += 1) {
+    for (let batch = 0; batch < this.purgeMaxBatches; batch += 1) {
       // LIMIT 不能用佔位符：MySQL 的 binary protocol 會以
       // ER_WRONG_ARGUMENTS 拒絕 `LIMIT ?`。這裡內插的是一個模組常數，不是
       // 任何外部輸入，所以沒有注入面。
@@ -173,12 +179,15 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
       const affected = Number(result?.affectedRows ?? 0);
       removed += affected;
 
+      // 沒刪滿一批代表已經沒有過期的列了。
       if (affected < PURGE_BATCH_SIZE) {
-        break;
+        return { removed, exhausted: false };
       }
     }
 
-    return removed;
+    // 批次上限用完，而最後一批還是滿的——很可能還有沒刪到的。剛好整除時這會
+    // 是個假警報，但寧可偶爾多叫一聲，也不要讓「清理追不上」一直沒有訊號。
+    return { removed, exhausted: true };
   }
 
   /** 秒是資料庫時鐘的精度；不足一秒的租約會立刻過期，所以至少給一秒。 */

@@ -49,6 +49,16 @@ const idempotencyConfig = {
   // 它的大小由 defaultTtlMs 與清理工作決定。
   memoryMaxEntries: 10000,
 
+  // 一輪清理最多刪除幾批（每批 1000 列）。
+  //
+  // 上限的存在理由是不要讓一次 DELETE 長時間佔住資料庫；工作本身的 timeoutMs
+  // 是第二道保護。跑滿這個上限會記一筆 warn——那代表清理追不上產生速度，表會
+  // 單調成長，而那沒有其他徵兆。
+  //
+  // 預設 50 批 = 每輪 50,000 列。以 15 分鐘的排程間隔換算，大約是每秒 55 筆
+  // 啟用 idempotency 的請求。持續超過就要調大它，或縮短 defaultTtlMs。
+  purgeMaxBatches: 50,
+
   // 單筆已完成 response 允許保存的最大位元組數。
   //
   // 超過的回應不會被快取：該 key 直接釋放，重試會重新執行 handler。這是刻意

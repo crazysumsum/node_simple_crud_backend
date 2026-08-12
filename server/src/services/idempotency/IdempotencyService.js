@@ -127,7 +127,8 @@ export class IdempotencyService {
     return new MySqlIdempotencyStore({
       database: services.require("mysqldatabase"),
       time: this.time,
-      maxResponseBytes: this.config.maxResponseBytes
+      maxResponseBytes: this.config.maxResponseBytes,
+      purgeMaxBatches: this.config.purgeMaxBatches
     });
   }
 
@@ -308,13 +309,30 @@ export class IdempotencyService {
 
   /** 刪除過期紀錄。由 IdempotencyPurgeJob 以 cluster scope 排程。 */
   async purge() {
-    const removed = (await this.store.purge?.()) ?? 0;
+    const { removed, exhausted } = (await this.store.purge?.()) ?? {
+      removed: 0,
+      exhausted: false
+    };
 
     if (removed > 0) {
       await this.logger?.info?.(
         "idempotency.purged",
         "Expired idempotency records were removed",
         { removedRecords: removed, storeAdapter: this.config.storeAdapter }
+      );
+    }
+
+    if (exhausted) {
+      // 清理追不上產生速度，表會單調成長。這件事沒有其他徵兆——過期判斷是
+      // 逐筆做的，所以行為完全正常，只是表越來越大。
+      await this.logger?.warn?.(
+        "idempotency.purge_incomplete",
+        "Idempotency purge hit its batch limit; expired records are outpacing cleanup",
+        {
+          removedRecords: removed,
+          purgeMaxBatches: this.config.purgeMaxBatches,
+          remedy: "Raise idempotency.purgeMaxBatches, or shorten defaultTtlMs."
+        }
       );
     }
 

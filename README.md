@@ -907,6 +907,11 @@ Disabling the service is allowed, but any route still declaring idempotency then
 startup — losing the guarantee silently is worse than not booting. Responses larger
 than `maxResponseBytes` are not cached: the key is released and a retry re-executes.
 
+`idempotency.purge` reclaims expired rows every 15 minutes with cluster scope, deleting
+in batches of 1000 up to `purgeMaxBatches` per run. Expiry itself is decided per row on
+read, so a purge that falls behind costs table size, not correctness — and because that
+has no other symptom, hitting the batch limit logs `idempotency.purge_incomplete`.
+
 ## Request Validation
 
 Every Handler declares `requestSchema` in `static api`. JSON Schema can

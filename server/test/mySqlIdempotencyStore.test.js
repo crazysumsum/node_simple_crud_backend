@@ -136,7 +136,8 @@ function createStore(overrides = {}) {
   const store = new MySqlIdempotencyStore({
     database,
     time: createTestTime(),
-    maxResponseBytes: overrides.maxResponseBytes ?? 1048576
+    maxResponseBytes: overrides.maxResponseBytes ?? 1048576,
+    purgeMaxBatches: overrides.purgeMaxBatches ?? 50
   });
 
   return { store, database };
@@ -289,7 +290,7 @@ test("purge deletes only expired rows and reports the count", async () => {
   database.state.dbNowSeconds += 2000;
   await store.begin("fresh", OPTIONS);
 
-  assert.equal(await store.purge(), 1);
+  assert.deepEqual(await store.purge(), { removed: 1, exhausted: false });
   assert.deepEqual([...database.rows.keys()], ["fresh"]);
 });
 
@@ -416,4 +417,74 @@ test("a completed record with no body replays without one", async () => {
     state: "replay",
     response: { statusCode: 204, body: undefined }
   });
+});
+
+test("purge stops at the configured batch limit and says it is behind", async () => {
+  // 每批 1000 列，上限 2 批：造 2500 列過期資料，一輪只清得掉 2000。
+  const rows = new Map();
+  const state = { dbNowSeconds: 1000 };
+
+  for (let index = 0; index < 2500; index += 1) {
+    rows.set(`k${index}`, { expires_at: 0 });
+  }
+
+  const database = {
+    query: async () => [[]],
+    execute: async (sql) => {
+      const limit = Number(sql.match(/LIMIT (\d+)$/)[1]);
+      let affected = 0;
+
+      for (const [key, row] of rows) {
+        if (affected >= limit) {
+          break;
+        }
+
+        if (row.expires_at <= state.dbNowSeconds) {
+          rows.delete(key);
+          affected += 1;
+        }
+      }
+
+      return [{ affectedRows: affected }];
+    }
+  };
+  const store = new MySqlIdempotencyStore({
+    database,
+    time: createTestTime(),
+    purgeMaxBatches: 2
+  });
+
+  const result = await store.purge();
+
+  // exhausted 是「清理追不上」唯一的訊號：行為完全正常，只是表越來越大。
+  assert.deepEqual(result, { removed: 2000, exhausted: true });
+  assert.equal(rows.size, 500);
+
+  // 下一輪把剩下的清完，這次就不再喊落後。
+  assert.deepEqual(await store.purge(), { removed: 500, exhausted: false });
+});
+
+test("the batch limit is configurable, and honoured", async () => {
+  const executed = [];
+  const database = {
+    query: async () => [[]],
+    execute: async (sql) => {
+      executed.push(sql);
+      return [{ affectedRows: 1000 }];
+    }
+  };
+
+  for (const purgeMaxBatches of [1, 3]) {
+    executed.length = 0;
+    const store = new MySqlIdempotencyStore({
+      database,
+      time: createTestTime(),
+      purgeMaxBatches
+    });
+
+    const { exhausted } = await store.purge();
+
+    assert.equal(executed.length, purgeMaxBatches);
+    assert.equal(exhausted, true);
+  }
 });

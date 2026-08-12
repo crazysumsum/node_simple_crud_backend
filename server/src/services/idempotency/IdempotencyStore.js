@@ -15,10 +15,13 @@ export class IdempotencyStore {
    * 主動刪除已過期的紀錄，由 IdempotencyPurgeJob 定時呼叫。
    *
    * 記憶體 adapter 靠自己的掃描回收，共享 adapter 則需要有人來收——沒有人來
-   * 收的話，表的大小只會單調成長。回傳刪除筆數供排程日誌記錄。
+   * 收的話，表的大小只會單調成長。
+   *
+   * 回傳 removed（刪除筆數）與 exhausted（是否因為撞到單輪上限才停手，而不是
+   * 因為刪完了）。後者是「清理追不上」唯一的訊號。
    */
   async purge() {
-    return 0;
+    return { removed: 0, exhausted: false };
   }
 
   async close() {}

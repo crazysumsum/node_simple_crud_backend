@@ -74,6 +74,10 @@ export function normalizeIdempotencyConfig(source) {
       source.memoryMaxEntries ?? 10000,
       "memoryMaxEntries"
     ),
+    purgeMaxBatches: positiveInteger(
+      source.purgeMaxBatches ?? 50,
+      "purgeMaxBatches"
+    ),
     maxResponseBytes: positiveInteger(
       source.maxResponseBytes ?? 1048576,
       "maxResponseBytes"
