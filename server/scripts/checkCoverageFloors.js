@@ -15,7 +15,13 @@ import { fileURLToPath } from "node:url";
  */
 const FLOORS = {
   "src/framework/idempotency/IdempotencyManager.js": { lines: 95, branches: 85 },
-  "src/framework/idempotency/IdempotencyStore.js": { lines: 85, branches: 80 },
+  // functions 在這裡是必要的：這個檔案曾經 lines 88%／branches 86% 穩穩過關，
+  // 而 fail()（釋放 key 的唯一路徑）與過期清理的刪除分支從來沒有被呼叫過。
+  "src/framework/idempotency/IdempotencyStore.js": {
+    lines: 95,
+    branches: 90,
+    functions: 90
+  },
   "src/services/mysqldatabase/MySqlDatabaseService.js": { lines: 95, branches: 88 },
   "src/framework/middleware/apiDispatcher.js": { lines: 88, branches: 70 },
   "src/framework/upload/uploadMiddleware.js": { lines: 90, branches: 75 },
@@ -45,7 +51,14 @@ function parseLcov(content) {
     const line = rawLine.trim();
 
     if (line.startsWith("SF:")) {
-      current = { lines: null, linesHit: 0, branches: null, branchesHit: 0 };
+      current = {
+        lines: null,
+        linesHit: 0,
+        branches: null,
+        branchesHit: 0,
+        functions: null,
+        functionsHit: 0
+      };
       files.set(line.slice(3), current);
       continue;
     }
@@ -60,6 +73,8 @@ function parseLcov(content) {
     if (key === "LH") current.linesHit = value;
     if (key === "BRF") current.branches = value;
     if (key === "BRH") current.branchesHit = value;
+    if (key === "FNF") current.functions = value;
+    if (key === "FNH") current.functionsHit = value;
     if (line === "end_of_record") current = null;
   }
 
@@ -106,6 +121,19 @@ async function main() {
       failures.push(
         `${file}: branches ${branches.toFixed(2)}% is below the ${floor.branches}% floor`
       );
+    }
+
+    // functions 是選填的。它抓的是「整個方法從來沒有被呼叫過」——那種洞不會
+    // 讓行覆蓋掉多少（一個沒被呼叫的短方法只有一兩行），所以只看 lines 與
+    // branches 的話，一個函式覆蓋 53% 的檔案照樣可以穩穩通過門檻。
+    if (floor.functions !== undefined) {
+      const functions = percentage(entry.functionsHit, entry.functions);
+
+      if (functions < floor.functions) {
+        failures.push(
+          `${file}: functions ${functions.toFixed(2)}% is below the ${floor.functions}% floor`
+        );
+      }
     }
   }
 
