@@ -154,7 +154,9 @@ test("service discovery finds the built-in public services", async () => {
       // 認證策略也是一般 service，因此出現在這份清單裡。
       name: "auth.jwt",
       lifecycle: "singleton",
-      dependencies: ["jwt", "logging"]
+      // 撤銷檢查在策略裡，不在 jwt service 裡：jwt 保持零依賴，簽發與驗證
+      // 不該被綁上資料庫。
+      dependencies: ["jwt", "tokenRevocation", "logging"]
     },
     {
       // 自己不記錄任何東西，但 BaseAuthStrategy 會取用 logging。
@@ -209,9 +211,27 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["scheduler", "requestLimiter"]
     },
     {
+      // cluster scope：撤銷表是所有實例共用的，每台都掃一次只是重複同一個
+      // DELETE。清理與刷新刻意分成兩個 job，正是因為 scope 相反。
+      name: "job.tokenRevocationPurge",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "tokenRevocation"]
+    },
+    {
+      // instance scope：快照在每個實例自己的記憶體裡，每一台都得自己刷新。
+      name: "job.tokenRevocationRefresh",
+      lifecycle: "singleton",
+      dependencies: ["scheduler", "tokenRevocation", "logging"]
+    },
+    {
       name: "time",
       lifecycle: "singleton",
       dependencies: []
+    },
+    {
+      name: "tokenRevocation",
+      lifecycle: "singleton",
+      dependencies: ["mysqldatabase", "logging", "time"]
     }
   ]);
 });

@@ -10,16 +10,9 @@ GRANT ALL PRIVILEGES ON erp_dev.* TO 'erp_user'@'%';
 
 USE erp_dev;
 
--- scope: "cluster" 的背景工作用這張表確保同一輪只有一個實例執行。
--- expires_at 為 0 代表目前沒有人持有；持有者崩潰時租約會自然過期，
--- 讓其他實例在下一輪接手。
-CREATE TABLE IF NOT EXISTS job_leases (
-  job_name    VARCHAR(190) NOT NULL,
-  owner       VARCHAR(190) NOT NULL DEFAULT '',
-  acquired_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
-  expires_at  BIGINT UNSIGNED NOT NULL DEFAULT 0,
-  PRIMARY KEY (job_name)
-);
+-- 框架自己的表都在 database/framework/ 底下，並以 fr_ 前綴命名。這個檔案只
+-- 負責建庫、建帳號，以及業務範例資料——兩者分開，是為了讓「這張表誰擁有、
+-- 升級框架時什麼會變」一眼看得出來。
 
 CREATE TABLE IF NOT EXISTS users (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

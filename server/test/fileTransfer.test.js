@@ -7,6 +7,7 @@ import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
 import { resolveWithinDirectory } from "../src/framework/http/fileResponse.js";
+import { fakeDatabaseOptions } from "../test-support/fakeMySqlPool.js";
 
 // 真實的檔案位元組。內容校驗必須靠簽章，所以測試不能用假資料。
 const PDF = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(64, 0x20)]);
@@ -152,7 +153,7 @@ async function startApplication(t) {
     logger: silentLogger,
     requestLogger: (_req, _res, next) => next(),
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+      mysqldatabase: fakeDatabaseOptions()
     },
     forceExit: () => {
       throw new Error("File transfer test must not force exit");
@@ -613,7 +614,7 @@ test("a custom type registered in the service is accepted end to end", async (t)
           }
         }
       },
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+      mysqldatabase: fakeDatabaseOptions()
     },
     logger: silentLogger,
     requestLogger: (_req, _res, next) => next(),

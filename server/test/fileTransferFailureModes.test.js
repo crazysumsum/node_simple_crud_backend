@@ -8,6 +8,7 @@ import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
 import { resolveWithinDirectory } from "../src/framework/http/fileResponse.js";
+import { fakeDatabaseOptions } from "../test-support/fakeMySqlPool.js";
 
 // 這一組測試涵蓋的是「上傳／下載成功以外」的路徑：逾時、客戶端中斷、驗證
 // 失敗、handler 失敗、重播。這些正是先前只測快樂路徑而漏掉的地方。
@@ -141,7 +142,7 @@ async function startApplication(t, { limits } = {}) {
     logger: silentLogger,
     requestLogger: (_req, _res, next) => next(),
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+      mysqldatabase: fakeDatabaseOptions()
     },
     forceExit: () => {
       throw new Error("File transfer failure tests must not force exit");

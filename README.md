@@ -35,6 +35,20 @@ log file dates use this IANA time zone through the injected `time` service.
    mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/init.sql
    ```
 
+   ```bash
+   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/scheduler.sql
+   ```
+
+   ```bash
+   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/jwt.sql
+   ```
+
+   `init.sql` must run first: it creates the database and the application user.
+   The files under `database/framework/` create the framework's own tables, which
+   are all named with an `fr_` prefix so that framework-owned tables are never
+   confused with business tables. The server fails to start with a message naming
+   the missing file if one of them was not applied.
+
    This creates the `erp_dev` database and an application user:
 
    - User: `erp_user`
@@ -1155,7 +1169,8 @@ On this Mac, `/usr/local/mysql` exists, but the server did not start successfull
 ```text
 client/                Vue 3 frontend
 server/                Node.js Express API
-server/database/       MySQL schema and seed data
+server/database/       MySQL schema and seed data for the business
+server/database/framework/  Framework-owned tables, all prefixed fr_
 server/src/framework/  Reusable API framework capabilities
 server/src/handlers/   Auto-discovered business API handlers
 server/src/services/   Auto-discovered shared application services

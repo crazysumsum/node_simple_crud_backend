@@ -28,6 +28,10 @@ const schedulerConfig = {
   // 可覆寫的欄位：enabled、intervalMs、timeoutMs。
   jobs: {
     // "report.monthly": { enabled: false },
+
+    // JWT 撤銷的刷新間隔。調大它等於延後撤銷生效的時間，所以啟動時會與
+    // config/tokenRevocation.js 的 maxStalenessSeconds 交叉檢查——超過那個
+    // 保證就直接啟動失敗，不會靜默地放寬安全承諾。
     // "tokenRevocation.refresh": { intervalMs: 5000 }
   }
 };

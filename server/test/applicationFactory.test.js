@@ -6,6 +6,10 @@ import { BaseAuthStrategy } from "../src/framework/auth/BaseAuthStrategy.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
 import { ConfigurationError } from "../src/framework/configuration/ConfigurationError.js";
+import {
+  fakeDatabaseOptions,
+  fakeMySqlPool
+} from "../test-support/fakeMySqlPool.js";
 
 function memoryLogger() {
   const entries = [];
@@ -111,17 +115,7 @@ test("application factory shuts down container services when setup fails", async
 test("application factory builds a startable and stoppable API with injected resources", async (t) => {
   const source = defaultConfigurationSource();
   const logger = memoryLogger();
-  let poolEndCalls = 0;
-  let poolQueryCalls = 0;
-  const pool = {
-    query: async () => {
-      poolQueryCalls += 1;
-      return [[{ ok: 1 }]];
-    },
-    end: async () => {
-      poolEndCalls += 1;
-    }
-  };
+  const pool = fakeMySqlPool();
   const application = await createApplication({
     configurationSource: {
       ...source,
@@ -142,9 +136,12 @@ test("application factory builds a startable and stoppable API with injected res
   t.after(() => application.shutdown("test_cleanup"));
 
   assert.equal(application.state, "created");
-  assert.equal(poolQueryCalls, 1);
+  // 啟動時剛好兩次查詢：連線驗證，以及撤銷名單的首次載入。數字釘死是為了擋住
+  // 「每個 service 都在啟動時順手打一次資料庫」這種會慢慢長出來的問題。
+  assert.equal(pool.calls.query, 2);
   const { url } = await application.start();
-  assert.equal(poolQueryCalls, 1);
+  // start() 只是開始監聽，不該再產生查詢。
+  assert.equal(pool.calls.query, 2);
   const response = await fetch(`${url}/api/v1/health`);
   const body = await response.json();
 
@@ -176,7 +173,7 @@ test("application factory builds a startable and stoppable API with injected res
   assert.equal(result.exitCode, 0);
   assert.equal(result.httpServerClosed, true);
   assert.equal(result.servicesClosed, true);
-  assert.equal(poolEndCalls, 1);
+  assert.equal(pool.calls.end, 1);
   assert.ok(
     logger.entries.some((entry) => entry.event === "configuration.validated")
   );
@@ -216,7 +213,7 @@ test("responses that short-circuit the request still carry CORS headers", async 
     logger: memoryLogger(),
     requestLogger: testRequestLogger(),
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+      mysqldatabase: fakeDatabaseOptions()
     },
     forceExit: () => {
       throw new Error("Factory test must not force exit");
@@ -268,11 +265,13 @@ test("the application factory does not itself require the scheduler", async (t) 
         new URL("../src/services/auth/JwtService.js", import.meta.url).href,
         new URL("../src/services/auth/jwtAuthStrategy.js", import.meta.url).href,
         new URL("../src/services/auth/publicAuthStrategy.js", import.meta.url).href,
-        new URL("../src/services/mysqldatabase/MySqlDatabaseService.js", import.meta.url).href
+        new URL("../src/services/mysqldatabase/MySqlDatabaseService.js", import.meta.url).href,
+        // auth.jwt 現在宣告 tokenRevocation，所以這份清單也要帶上它。
+        new URL("../src/services/tokenRevocation/TokenRevocationService.js", import.meta.url).href
       ]
     },
     serviceOptions: {
-      mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+      mysqldatabase: fakeDatabaseOptions()
     }
   });
   t.after(() => application.shutdown("test_cleanup"));
@@ -413,10 +412,7 @@ test("business handlers and auth strategies are auto-discovered from implementat
 
   const source = defaultConfigurationSource();
   const logger = memoryLogger();
-  const pool = {
-    query: async () => [[{ ok: 1 }]],
-    end: async () => {}
-  };
+  const pool = fakeMySqlPool();
   const application = await createApplication({
     configurationSource: {
       ...source,

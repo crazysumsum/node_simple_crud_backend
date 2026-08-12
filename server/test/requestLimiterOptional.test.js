@@ -6,6 +6,7 @@ import {
   defaultConfigurationSource,
   validateApplicationConfiguration
 } from "../src/framework/configuration/applicationConfiguration.js";
+import { fakeDatabaseOptions } from "../test-support/fakeMySqlPool.js";
 
 // 限流器抽成 service 之後，框架就不該再依賴它。這裡釘住那條界線：框架用
 // get() 取限流器，停用之後應用照常啟動；而宣告了依賴的 job 照常啟動失敗——
@@ -106,7 +107,7 @@ function configurationSource() {
 }
 
 const mysqlOptions = {
-  mysqldatabase: { pool: { query: async () => [[{ ok: 1 }]], end: async () => {} } }
+  mysqldatabase: fakeDatabaseOptions()
 };
 
 test("the application starts and serves requests with the limiter disabled", async (t) => {

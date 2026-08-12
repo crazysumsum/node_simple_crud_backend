@@ -23,7 +23,7 @@ function fakeDatabase({ now = 1000, rows = new Map(), onTransaction } = {}) {
       return [row ? [{ ...row }] : []];
     }
 
-    if (sql.startsWith("UPDATE job_leases SET owner")) {
+    if (sql.startsWith("UPDATE fr_job_leases SET owner")) {
       const [owner, acquiredAt, expiresAt, jobName] = params;
       rows.set(jobName, { owner, acquired_at: acquiredAt, expires_at: expiresAt });
       return [{ affectedRows: 1 }];
@@ -42,7 +42,7 @@ function fakeDatabase({ now = 1000, rows = new Map(), onTransaction } = {}) {
       return [{ affectedRows: 0 }];
     }
 
-    if (sql.includes("INSERT INTO job_leases")) {
+    if (sql.includes("INSERT INTO fr_job_leases")) {
       const [jobName] = params;
 
       if (!rows.has(jobName)) {
