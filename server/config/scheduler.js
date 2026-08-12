@@ -24,6 +24,28 @@ const schedulerConfig = {
   // 設為 0 可關閉抖動，讓執行時間點可預測。
   startupJitterRatio: 0.2,
 
+  // 排程統計的發佈。每個實例週期性地把自己的統計寫進 fr_job_stats，並輸出一
+  // 筆彙總日誌。
+  //
+  // 這裡沒有 enabled：發佈統計是 job.schedulerStatsFlush 這個 service 在做，
+  // 要關掉它就把那個 service 的 static service.enabled 設成 false。發佈頻率也
+  // 不在這裡，它就是那件工作的 intervalMs，用下面的 jobs 覆寫即可。
+  stats: {
+    // 這個實例的對外位址，純粹是給人看的附註。一台機器有多張網卡、容器裡拿到
+    // 的又通常是無意義的臨時位址，所以框架不去猜——沒設就留空，識別本來就是
+    // 由 instance_id（= 租約的 owner）負責的。
+    address: process.env.APP_INSTANCE_ADDRESS || "",
+
+    // 一列連續幾輪沒有更新就視為死掉的實例並刪除。用「輪數」而不是毫秒，是
+    // 為了讓它跟著 scheduler.statsFlush 的 intervalMs 一起變——寫死毫秒的話，
+    // 有人把間隔調成一小時就會讓活著的實例被自己的清理刪掉。
+    staleAfterRuns: 3,
+
+    // 一件工作連續失敗幾次就把彙總日誌升級成 error。表本身不會叫醒任何人，
+    // 這一行才會。
+    consecutiveFailureAlertThreshold: 3
+  },
+
   // 依工作名稱覆寫。部署時要調整頻率或關掉某件工作，不必改程式碼。
   // 可覆寫的欄位：enabled、intervalMs、timeoutMs。
   jobs: {

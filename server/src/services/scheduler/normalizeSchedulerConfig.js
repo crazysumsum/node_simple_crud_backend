@@ -59,6 +59,40 @@ function jobOverride(source, name) {
   return Object.freeze(override);
 }
 
+/**
+ * 統計發佈的設定。刻意沒有 enabled 與 intervalMs：前者由
+ * job.schedulerStatsFlush 的 static service.enabled 決定，後者就是那件工作的
+ * intervalMs。同一件事有兩個開關，遲早會出現兩邊不一致而沒人發現的情況。
+ */
+function statsConfig(source) {
+  if (source === null || typeof source !== "object" || Array.isArray(source)) {
+    throw new Error('Scheduler config "stats" must be an object');
+  }
+
+  const address = String(source.address ?? "");
+
+  if (address.length > 64) {
+    throw new Error('Scheduler config "stats.address" must be at most 64 characters');
+  }
+
+  const staleAfterRuns = positiveInteger(source.staleAfterRuns ?? 3, "stats.staleAfterRuns");
+
+  // 1 代表「錯過一輪就當你死了」。排程有抖動、資料庫偶爾慢一下，那會讓活著的
+  // 實例被反覆刪掉又寫回來。
+  if (staleAfterRuns < 2) {
+    throw new Error('Scheduler config "stats.staleAfterRuns" must be at least 2');
+  }
+
+  return Object.freeze({
+    address,
+    staleAfterRuns,
+    consecutiveFailureAlertThreshold: positiveInteger(
+      source.consecutiveFailureAlertThreshold ?? 3,
+      "stats.consecutiveFailureAlertThreshold"
+    )
+  });
+}
+
 export function normalizeSchedulerConfig(source) {
   if (source === null || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Scheduler config must be an object");
@@ -88,6 +122,7 @@ export function normalizeSchedulerConfig(source) {
       "clusterLeaseGraceMs"
     ),
     startupJitterRatio: ratio(source.startupJitterRatio ?? 0.2, "startupJitterRatio"),
+    stats: statsConfig(source.stats ?? {}),
     jobs: Object.freeze(jobs)
   });
 }
