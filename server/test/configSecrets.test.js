@@ -63,7 +63,8 @@ test("normalized config wraps the jwt secret and the database password", () => {
     password: "db-password",
     database: "erp",
     connectionLimit: 10,
-    queueLimit: 0,
+    queueLimit: 200,
+    acquireTimeoutMs: 5000,
     queryTimeoutMs: 1000,
     transactionTimeoutMs: 1000
   });
@@ -116,7 +117,8 @@ test("the connection pool receives a plain password, not the wrapper", () => {
     password: "db-password",
     database: "erp",
     connectionLimit: 10,
-    queueLimit: 0,
+    queueLimit: 200,
+    acquireTimeoutMs: 5000,
     queryTimeoutMs: 1000,
     transactionTimeoutMs: 1000
   });

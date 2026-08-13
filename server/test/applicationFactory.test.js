@@ -124,6 +124,13 @@ test("application factory builds a startable and stoppable API with injected res
         port: 0,
         requestTimeoutMs: 100,
         shutdownTimeoutMs: 1000
+      },
+      // route 逾時縮到 100ms，DB 的預算就得跟著縮——啟動時的交叉檢查要求
+      // 資料庫先於 route 放棄。
+      database: {
+        ...source.database,
+        acquireTimeoutMs: 40,
+        queryTimeoutMs: 40
       }
     },
     logger,
@@ -529,6 +536,14 @@ test("application creation fails and cleans up when an eager service cannot init
                 poolQueryCalls += 1;
                 throw connectionError;
               },
+              getConnection: async () => ({
+                query: async () => {
+                  poolQueryCalls += 1;
+                  throw connectionError;
+                },
+                release: () => {},
+                destroy: () => {}
+              }),
               end: async () => {
                 poolEndCalls += 1;
               }
