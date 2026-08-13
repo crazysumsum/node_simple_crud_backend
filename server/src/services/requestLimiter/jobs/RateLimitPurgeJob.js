@@ -14,6 +14,11 @@ import { BaseService } from "../../../framework/services/BaseService.js";
  *
  * scope 維持 instance：記憶體 store 在各自的行程裡，每個實例都得清自己的。
  * 共享 adapter 通常靠儲存層的 TTL 過期，purge() 預設是 no-op。
+ *
+ * 刪除的判準是「桶已經完全回滿」，不是「桶存在很久了」。RequestLimiterService
+ * 傳的 before 是 now - ipWindowMs，而從空桶回滿正好需要 ipWindowMs，所以兩者
+ * 剛好對齊。放寬這個條件會把還沒回滿的桶一起刪掉——那等於把剩下的配額免費送
+ * 給那個 IP，而且沒有任何症狀。
  */
 export class RateLimitPurgeJob extends BaseService {
   static service = Object.freeze({

@@ -47,6 +47,13 @@ const FLOORS = {
   // 限流器壞掉有兩種形態：安靜地不再限流，或把佇列卡死。前者在開發時完全看
   // 不出來，後者只在有負載時才發作。
   "src/services/requestLimiter/RequestLimiterService.js": { lines: 85, branches: 75 },
+  // Token bucket 的每一種錯誤都不會拋錯，只會讓限流「跟想的不一樣」：被擋住的
+  // IP 永遠解不開、清理免費送配額、時鐘回撥倒扣 token。
+  "src/services/requestLimiter/RateLimitStore.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
   // 共享 idempotency 的失效是安靜的：互斥一旦破掉，症狀只是「偶爾重複執行」，
   // 而那在單機開發時永遠不會出現。
   "src/services/idempotency/MySqlIdempotencyStore.js": {
