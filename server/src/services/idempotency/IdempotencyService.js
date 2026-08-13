@@ -222,6 +222,27 @@ export class IdempotencyService {
       );
     }
 
+    if (begin.state === "completedWithoutResponse") {
+      // 這個 key 已經成功執行過了，只是回應沒能保存下來。重試不能重新執行——
+      // 那正是這個狀態存在的理由——也不能假裝重播一個空回應。唯一誠實的答案是
+      // 告訴客戶端「做完了，但結果拿不回來，別再送這個 key」。
+      void this.logger?.warn?.(
+        "idempotency.response.unavailable",
+        "An idempotency key completed successfully but its response was not stored",
+        {
+          requestId:
+            req.requestId || this.context.get()?.requestId || null,
+          method: req.method,
+          path: route.path
+        }
+      );
+      throw new IdempotencyError(
+        "IDEMPOTENCY_RESULT_UNAVAILABLE",
+        "This request already completed successfully, but its response was not stored. Do not retry it; query the resource instead.",
+        409
+      );
+    }
+
     if (begin.state === "capacityExceeded") {
       res.setHeader("Retry-After", "1");
       throw new IdempotencyError(
@@ -263,25 +284,37 @@ export class IdempotencyService {
 
     try {
       const result = await work();
+      const succeeded = this.config.cacheableStatusCodes.includes(res.statusCode);
 
-      if (
-        responseBody !== undefined &&
-        this.config.cacheableStatusCodes.includes(res.statusCode)
-      ) {
-        try {
-          await this.store.complete(
-            storeKey,
-            { statusCode: res.statusCode, body: responseBody },
-            { ttlMs: routeOptions.ttlMs }
-          );
-        } catch (error) {
-          void this.logger?.error?.("idempotency.store.complete_failed", "Failed to save idempotent response", {
-            requestId: req.requestId || null,
-            error: { name: error.name, message: error.message }
-          });
-        }
-      } else {
+      // handler 回了不可快取的狀態碼——這次沒有成功，釋放 key 讓重試重新執行。
+      // 這是 fail() 唯一還該出現在成功路徑上的地方。
+      if (!succeeded) {
         await this.store.fail(storeKey);
+        return result;
+      }
+
+      // 成功了，但沒有經過 res.json()——檔案下載走 res.end()，就是這一種。
+      // 沒有可重播的回應，但業務操作確實做完了。
+      if (responseBody === undefined) {
+        await this.markUnavailable(storeKey, req, routeOptions, "no_response_body");
+        return result;
+      }
+
+      try {
+        await this.store.complete(
+          storeKey,
+          { statusCode: res.statusCode, body: responseBody },
+          { ttlMs: routeOptions.ttlMs }
+        );
+      } catch (error) {
+        void this.logger?.error?.("idempotency.store.complete_failed", "Failed to save idempotent response", {
+          requestId: req.requestId || null,
+          error: { name: error.name, message: error.message }
+        });
+        // 回應存不下來（資料庫故障，或大於 maxResponseBytes）。先前這裡只記
+        // 一筆日誌就回傳成功，於是那一列留在 pending：租約到期之後重試會重新
+        // 執行一個已經成功的操作，而客戶端兩次都看到成功。
+        await this.markUnavailable(storeKey, req, routeOptions, "store_failed");
       }
 
       return result;
@@ -304,6 +337,32 @@ export class IdempotencyService {
       throw error;
     } finally {
       res.json = originalJson;
+    }
+  }
+
+  /**
+   * 把 key 標成「成功執行完，但回應沒有保存」，讓重試拿到 409 而不是重新執行。
+   *
+   * 這一步自己也可能失敗。失敗的話那一列會留在 pending，於是重試在租約到期前
+   * 拿到 409、之後可以重新執行——也就是修正前的行為。這是唯一無法再往下收斂的
+   * 殘餘情況（要救它得在同一個交易裡完成業務操作與 idempotency 寫入，而框架
+   * 管不到 handler 的交易邊界），所以它必須是一筆 error 而不是 warn。
+   */
+  async markUnavailable(storeKey, req, routeOptions, reason) {
+    try {
+      await this.store.markUnavailable(storeKey, { ttlMs: routeOptions.ttlMs });
+    } catch (error) {
+      void this.logger?.error?.(
+        "idempotency.store.mark_unavailable_failed",
+        "An idempotency key could not be closed after its work succeeded; a retry may execute it again",
+        {
+          requestId: req.requestId || null,
+          path: req.apiRoute?.path ?? null,
+          reason,
+          pendingLeaseMs: this.config.pendingLeaseMs,
+          error: { name: error.name, message: error.message }
+        }
+      );
     }
   }
 

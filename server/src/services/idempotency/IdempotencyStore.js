@@ -1,6 +1,7 @@
 export class IdempotencyStore {
-  // begin() must atomically return started, conflict, inProgress, replay, or
-  // capacityExceeded. Shared adapters must provide the same guarantee.
+  // begin() must atomically return started, conflict, inProgress, replay,
+  // completedWithoutResponse, or capacityExceeded. Shared adapters must
+  // provide the same guarantee.
   async begin(_key, _options) {
     throw new Error(`${this.constructor.name} must implement begin()`);
   }
@@ -9,6 +10,24 @@ export class IdempotencyStore {
     throw new Error(`${this.constructor.name} must implement complete()`);
   }
 
+  /**
+   * 記下「這個 key 已經成功執行完，但回應沒有保存」。
+   *
+   * 這是這個介面裡唯一為了「不執行第二次」而存在的方法，也是三條路徑共用的
+   * 落點：complete() 寫入失敗、回應大於 maxResponseBytes、以及回應根本沒有經過
+   * res.json()（檔案下載）。
+   *
+   * 這三種情況先前都走 fail()，也就是把 key 釋放掉。那讓客戶端可以重試並拿到
+   * 一個回應——代價是已經成功的業務操作再執行一次，而客戶端兩次都看到成功。
+   * Idempotency 的保證是「只執行一次」，重播回應只是附帶的便利；兩者衝突時
+   * 不能放棄前者。
+   *
+   * 用完整的 ttlMs 而不是 pending 租約：租約的作用是讓崩潰的實例解鎖，而這裡
+   * 已經確定執行完了，這一列要活到重播窗口結束為止。
+   */
+  async markUnavailable(_key, _options) {}
+
+  /** 釋放一個沒有成功的 key，讓重試可以重新執行。 */
   async fail(_key) {}
 
   /**
@@ -103,6 +122,10 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
       return { state: "inProgress" };
     }
 
+    if (existing.state === "unavailable") {
+      return { state: "completedWithoutResponse" };
+    }
+
     return { state: "replay", response: existing.response };
   }
 
@@ -115,6 +138,20 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
 
     existing.state = "completed";
     existing.response = response;
+    existing.expiresAt = this.now() + ttlMs;
+  }
+
+  async markUnavailable(key, { ttlMs }) {
+    const existing = this.liveEntry(key);
+
+    // 只有仍在處理中的那一列該被改寫。已經 completed 的列被降級成
+    // completedWithoutResponse，等於把一個還能重播的回應丟掉。
+    if (!existing || existing.state !== "pending") {
+      return;
+    }
+
+    existing.state = "unavailable";
+    existing.response = null;
     existing.expiresAt = this.now() + ttlMs;
   }
 
@@ -147,6 +184,11 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
     this.lastCleanupAt = now;
   }
 
+  /**
+   * 只淘汰 completed 的項目。unavailable 不在此列：淘汰一筆 completed 只是讓
+   * 重播失效，淘汰一筆 unavailable 卻是把「不重複執行」的保證丟掉。map 被
+   * unavailable 塞滿時會回 capacityExceeded，也就是 503——那是安全的方向。
+   */
   evictCompletedEntry() {
     const oldest = [...this.entries.entries()]
       .filter(([, entry]) => entry.state === "completed")

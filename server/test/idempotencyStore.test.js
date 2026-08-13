@@ -252,10 +252,77 @@ test("an adapter may leave fail and close unimplemented", async () => {
   }
   const store = new MinimalStore();
 
-  // 這兩個刻意是 no-op 而不是 throw：靠儲存層 TTL 過期的 adapter 沒有東西要
+  // 這三個刻意是 no-op 而不是 throw：靠儲存層 TTL 過期的 adapter 沒有東西要
   // 釋放，無狀態的 adapter 也沒有東西要關。強迫它們實作只會逼出空方法。
   assert.equal(await store.fail("k"), undefined);
+  assert.equal(await store.markUnavailable("k", { ttlMs: 1000 }), undefined);
   assert.equal(await store.close(), undefined);
+});
+
+test("a memory key marked unavailable refuses a retry instead of re-running it", async () => {
+  const { store, clock } = storeAtTime();
+
+  assert.deepEqual(await store.begin("k", options), { state: "started" });
+  await store.markUnavailable("k", { ttlMs: 60_000 });
+
+  // 記憶體與 MySQL 兩個 adapter 的語意必須一致，否則單機開發看到的行為與
+  // 多實例部署不同——而這裡的差別是「業務操作會不會跑第二次」。
+  assert.deepEqual(await store.begin("k", options), {
+    state: "completedWithoutResponse"
+  });
+
+  clock.nowMs += 60_001;
+  // TTL 到期之後保護才解除，這是刻意的：不能永遠擋住一個 key。
+  assert.deepEqual(await store.begin("k", options), { state: "started" });
+});
+
+test("marking unavailable leaves a pending lease behind and uses the full ttl", async () => {
+  const { store, clock } = storeAtTime();
+
+  await store.begin("k", { ...options, ttlMs: 60_000, pendingLeaseMs: 5000 });
+  await store.markUnavailable("k", { ttlMs: 60_000 });
+
+  // 沿用租約的話保護會在五秒後消失，而重試通常就在那之後。
+  clock.nowMs += 5001;
+  assert.deepEqual(await store.begin("k", options), {
+    state: "completedWithoutResponse"
+  });
+});
+
+test("marking unavailable never downgrades a cached response", async () => {
+  const { store } = storeAtTime();
+
+  await store.begin("k", options);
+  await store.complete("k", { statusCode: 200, body: { id: 1 } }, { ttlMs: 60_000 });
+  await store.markUnavailable("k", { ttlMs: 60_000 });
+
+  assert.deepEqual(await store.begin("k", options), {
+    state: "replay",
+    response: { statusCode: 200, body: { id: 1 } }
+  });
+});
+
+test("capacity pressure never evicts the guarantee that work ran once", async () => {
+  const { store } = storeAtTime({ maxEntries: 1 });
+
+  await store.begin("done", options);
+  await store.markUnavailable("done", { ttlMs: 60_000 });
+
+  // 淘汰一筆 completed 只是讓重播失效；淘汰一筆 unavailable 是把「不重複執行」
+  // 的保證丟掉。滿了就回 capacityExceeded——503 是安全的方向。
+  assert.deepEqual(await store.begin("new", options), { state: "capacityExceeded" });
+  assert.deepEqual(await store.begin("done", options), {
+    state: "completedWithoutResponse"
+  });
+});
+
+test("marking an unknown key unavailable is a no-op, not a resurrection", async () => {
+  const { store } = storeAtTime();
+
+  // 一筆已經過期並被回收的 key 不該因為晚到的收尾又被寫回去。
+  await store.markUnavailable("never-seen", { ttlMs: 60_000 });
+
+  assert.equal(store.entries.size, 0);
 });
 
 test("eviction drops the completed entry that expires soonest", async () => {
