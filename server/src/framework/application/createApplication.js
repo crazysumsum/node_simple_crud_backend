@@ -421,6 +421,7 @@ export async function createApplication({
       logger: activeLogger,
       time,
       fileTypes,
+      apiUpload: configuration.api.upload,
       defaultRequestTimeoutMs: configuration.application.requestTimeoutMs
     });
     const app = express();

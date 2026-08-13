@@ -11,8 +11,10 @@ import {
 import { DISABLED_ROUTE_IDEMPOTENCY } from "../../services/idempotency/IdempotencyService.js";
 import { createRequestTimeoutMiddleware } from "./requestTimeout.js";
 import { cleanupUploadedFiles } from "../upload/cleanupUploadedFiles.js";
+import { UploadConcurrencyGate } from "../upload/uploadConcurrencyGate.js";
 import { createUploadMiddleware } from "../upload/uploadMiddleware.js";
 import {
+  normalizeApiUploadConfig,
   normalizeDownloadConfig,
   normalizeUploadConfig
 } from "../upload/normalizeUploadConfig.js";
@@ -186,6 +188,7 @@ export function createApiDispatcher({
   logger,
   time,
   fileTypes,
+  apiUpload = normalizeApiUploadConfig(apiConfig.upload),
   defaultRequestTimeoutMs = Number(applicationConfig.requestTimeoutMs)
 } = {}) {
   if (
@@ -233,6 +236,10 @@ export function createApiDispatcher({
 
   const router = Router();
   const registeredApis = [];
+  // 一個閘門，所有 route 共用——每條 route 各自一個等於沒有全域上限。
+  const uploadGate = new UploadConcurrencyGate({
+    maxConcurrentUploads: apiUpload.maxConcurrentUploads
+  });
 
   for (const route of routes) {
     const method = route.method.toLowerCase();
@@ -256,7 +263,12 @@ export function createApiDispatcher({
       `download config for ${routeKey}`
     );
     const uploadMiddleware = upload?.enabled
-      ? createUploadMiddleware({ config: upload, logger: activeLogger, fileTypes })
+      ? createUploadMiddleware({
+          config: upload,
+          logger: activeLogger,
+          fileTypes,
+          gate: uploadGate
+        })
       : null;
     const validateRequest = activeValidator.compile(route.requestSchema, routeKey);
     const validateResponse = activeResponseValidator.compile(
@@ -281,6 +293,8 @@ export function createApiDispatcher({
             maxFiles: upload.maxFiles,
             maxFieldCount: upload.maxFieldCount,
             maxFieldSizeBytes: upload.maxFieldSizeBytes,
+            maxTotalFileBytes: upload.maxTotalFileBytes,
+            maxRequestBytes: upload.maxRequestBytes,
             allowedMimeTypes: upload.allowedMimeTypes
           })
         : Object.freeze({ enabled: false }),
@@ -381,6 +395,38 @@ export function createApiDispatcher({
     registeredApiCount: registeredApis.length,
     registeredApis
   });
+
+  // 上傳的記憶體上界是「同時解析數 × 單一請求的位元組上限」，而那兩個數字先前
+  // 分別住在全域設定與各 handler 的 static api.upload 裡，乘積不在任何地方，
+  // 也沒有任何人被要求看過它。實測 100 個並行 10MB 上傳是 1088 MB RSS，而且
+  // 那些位元組是 Buffer、落在 V8 堆之外——--max-old-space-size 擋不住，程序
+  // 只會被 OOM killer 殺掉，沒有例外也沒有堆疊。
+  //
+  // 所以這裡把乘積算出來寫進啟動日誌。它不是限制，限制在 gate 與每條 route 的
+  // maxRequestBytes 上；它是那個一直看不見的數字。
+  const uploadApis = registeredApis.filter(({ upload }) => upload.enabled);
+
+  if (uploadApis.length > 0) {
+    const largestRequestBytes = Math.max(
+      ...uploadApis.map(({ upload }) => upload.maxRequestBytes)
+    );
+
+    void activeLogger.info(
+      "api.upload_budget",
+      "Upload memory budget",
+      {
+        maxConcurrentUploads: apiUpload.maxConcurrentUploads,
+        largestRequestBytes,
+        worstCaseBytes: apiUpload.maxConcurrentUploads * largestRequestBytes,
+        note: "Uploads are buffered in memory until they are verified, so this is the worst-case resident size. These Buffers live outside the V8 heap, so --max-old-space-size does not bound them.",
+        apis: uploadApis.map(({ method, path, upload }) => ({
+          api: `${method.toLowerCase()} ${path}`,
+          maxRequestBytes: upload.maxRequestBytes,
+          maxTotalFileBytes: upload.maxTotalFileBytes
+        }))
+      }
+    );
+  }
 
   // 未認證請求的 idempotency scope 只能靠 client IP 區分。IP 一旦不可信——
   // 部署在反向代理後面卻沒設 trustProxy 是最常見的情形——所有使用者會共用同一

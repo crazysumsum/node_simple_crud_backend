@@ -24,7 +24,16 @@ const FLOORS = {
   },
   "src/services/mysqldatabase/MySqlDatabaseService.js": { lines: 95, branches: 88 },
   "src/framework/middleware/apiDispatcher.js": { lines: 88, branches: 70 },
-  "src/framework/upload/uploadMiddleware.js": { lines: 90, branches: 75 },
+  "src/framework/upload/uploadMiddleware.js": { lines: 90, branches: 80 },
+  // 這個閘門是上傳記憶體唯一的全域上限——沒有它，「同時解析數 × 每個請求的
+  // 位元組上限」就沒有任何東西在強制。它的兩種壞法都是安靜的：上限失效會等到
+  // OOM killer 才顯現，而槽位洩漏是單向累積的，上傳會在某個時點之後全部開始
+  // 回 503，沒有任何錯誤指向原因。
+  "src/framework/upload/uploadConcurrencyGate.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
   "src/framework/middleware/requestTimeout.js": { lines: 80, branches: 60 },
   "src/services/auth/JwtService.js": { lines: 95, branches: 95 },
   "src/framework/configuration/SecretValue.js": { lines: 90, branches: 90 },
