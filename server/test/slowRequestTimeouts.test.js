@@ -156,7 +156,10 @@ test("a route timeout longer than the receive timeout fails startup", () => {
   );
 });
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const wait = (ms) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 // --- 看門狗本身 ----------------------------------------------------------------
 
@@ -338,7 +341,9 @@ test("the slow client is told why, and the log says how little it sent", async (
   socket.on("data", (chunk) => {
     received += chunk.toString();
   });
-  await new Promise((resolve) => socket.once("connect", resolve));
+  await new Promise((resolve) => {
+    socket.once("connect", resolve);
+  });
   socket.write(
     "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
       "Content-Type: application/json\r\nContent-Length: 100000\r\n\r\n" +
