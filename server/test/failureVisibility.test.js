@@ -64,7 +64,11 @@ test("a rejected JWT records why it failed without telling the client", async ()
         // 這個 token 過不了 verify()，所以撤銷檢查根本輪不到——替身只是為了
         // 滿足依賴宣告。撤銷本身有自己的測試。
         if (name === "tokenRevocation") {
-          return { isRevoked: () => false, snapshotAgeSeconds: () => 0 };
+          return {
+            isRevoked: () => false,
+            snapshotAgeSeconds: () => 0,
+            snapshotUsable: () => true
+          };
         }
 
         throw new Error(`Unexpected service: ${name}`);

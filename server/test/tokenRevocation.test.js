@@ -249,6 +249,119 @@ test("a failed refresh keeps serving the old snapshot and says how stale it is",
   assert.equal(entry.context.cachedSubjects, 1);
 });
 
+/**
+ * 讓時間可以往前推的 service，用來測快照年齡相關的行為。
+ */
+function stalableService({ config, rows = [{ subject: "42", revoked_before: 1000 }] } = {}) {
+  let nowMs = 1_000_000;
+  const database = fakeDatabase({ rows });
+  const time = createTestTime({ clock: () => new Date(nowMs) });
+  const { service, logger } = createService({ database, time, config });
+
+  return {
+    service,
+    logger,
+    database,
+    advance(seconds) {
+      nowMs += seconds * 1000;
+    },
+    breakDatabase() {
+      service.database = fakeDatabase({ fail: new Error("database is unreachable") });
+    }
+  };
+}
+
+test("fail open is time boxed: past the cap the snapshot stops counting", async () => {
+  const harness = stalableService({ config: { maxFailOpenSeconds: 300 } });
+  await harness.service.initialize();
+  harness.breakDatabase();
+
+  // 上界之內：撐著服務，這是 fail open 存在的理由——一次資料庫抖動不該
+  // 變成全站登出。
+  harness.advance(299);
+  assert.equal(await harness.service.refresh(), false);
+  assert.equal(harness.service.snapshotUsable(), true);
+
+  // 邊界：年齡剛好等於上界仍然算數。
+  harness.advance(1);
+  assert.equal(harness.service.snapshotUsable(), true);
+  assert.equal(harness.service.snapshotAgeSeconds(), 300);
+
+  // 越過上界：這已經不是抖動了。
+  harness.advance(1);
+  assert.equal(harness.service.snapshotUsable(), false);
+
+  // 熔斷不動快照本身——切線還在，恢復之後不需要重建。
+  assert.equal(harness.service.isRevoked({ sub: "42", iat: 999 }), true);
+});
+
+test("failureMode open restores the unbounded behaviour", async () => {
+  const harness = stalableService({
+    config: { maxFailOpenSeconds: 300, failureMode: "open" }
+  });
+  await harness.service.initialize();
+  harness.breakDatabase();
+
+  // 明確選擇「沒有上界」的人拿得到舊行為，八小時之後照樣放行。
+  harness.advance(8 * 3600);
+  assert.equal(await harness.service.refresh(), false);
+  assert.equal(harness.service.snapshotAgeSeconds(), 28_800);
+  assert.equal(harness.service.snapshotUsable(), true);
+});
+
+test("a snapshot that never loaded is never usable", async () => {
+  // initialize() 失敗就是啟動失敗，所以正常情況下走不到這裡。但 loadedAtMs
+  // 為 null 時 snapshotAgeSeconds() 回傳 null，null <= 300 在 JavaScript 裡
+  // 是 true——沒有這道短路，「從未載入」會被當成「非常新鮮」。
+  const { service } = createService({ database: fakeDatabase() });
+
+  assert.equal(service.loadedAtMs, null);
+  assert.equal(service.snapshotUsable(), false);
+});
+
+test("recovery is logged with how long revocation was down", async () => {
+  const harness = stalableService();
+  await harness.service.initialize();
+  const working = harness.service.database;
+
+  harness.breakDatabase();
+  assert.equal(await harness.service.refresh(), false);
+
+  harness.advance(420);
+  harness.service.database = working;
+  assert.equal(await harness.service.refresh(), true);
+
+  // 沒有這則日誌的話，「一片 error 之後恢復」與「一片 error 之後行程死掉」
+  // 在日誌上長得一模一樣。
+  const entry = harness.logger.entries.find(
+    ({ event }) => event === "auth.revocation.recovered"
+  );
+  assert.equal(entry.level, "info");
+  assert.equal(entry.context.outageSeconds, 420);
+
+  // 恢復之後不該每次成功都再記一次。
+  assert.equal(await harness.service.refresh(), true);
+  assert.equal(
+    harness.logger.entries.filter(
+      ({ event }) => event === "auth.revocation.recovered"
+    ).length,
+    1
+  );
+});
+
+test("a first-ever successful refresh is not reported as a recovery", async () => {
+  const harness = stalableService();
+  await harness.service.initialize();
+
+  assert.equal(await harness.service.refresh(), true);
+  assert.equal(
+    harness.logger.entries.some(
+      ({ event }) => event === "auth.revocation.recovered"
+    ),
+    false
+  );
+});
+
 test("a successful refresh picks up another instance's revocation", async () => {
   const database = fakeDatabase();
   const { service } = createService({ database });
@@ -324,11 +437,65 @@ test("the configuration rejects values that would silently weaken revocation", (
   const defaults = normalizeTokenRevocationConfig({});
   assert.equal(defaults.maxStalenessSeconds, 60);
   assert.equal(defaults.retentionSeconds, 604800);
+  assert.equal(defaults.maxFailOpenSeconds, 300);
+  // 預設熔斷，跟啟動時的立場一致：首載失敗就是啟動失敗。
+  assert.equal(defaults.failureMode, "closed");
+});
+
+test("the fail open cap must not be tighter than the staleness guarantee", () => {
+  // 上界小於 SLA 的話，快照在正常運作時就會超過它——熔斷會在資料庫完全健康
+  // 的情況下觸發。那不是保護，是設定錯誤。
+  assert.throws(
+    () =>
+      normalizeTokenRevocationConfig({
+        maxStalenessSeconds: 600,
+        maxFailOpenSeconds: 300
+      }),
+    /"maxFailOpenSeconds" \(300s\) must be at least "maxStalenessSeconds" \(600s\)/
+  );
+
+  // 相等是允許的：容忍零次刷新失敗，嚴格但自洽。
+  assert.equal(
+    normalizeTokenRevocationConfig({
+      maxStalenessSeconds: 300,
+      maxFailOpenSeconds: 300
+    }).maxFailOpenSeconds,
+    300
+  );
+
+  assert.throws(
+    () => normalizeTokenRevocationConfig({ maxFailOpenSeconds: 0 }),
+    /"maxFailOpenSeconds" must be a positive integer/
+  );
+});
+
+test("the failure mode has to be one of the two modes that exist", () => {
+  // 打錯字不能靜默退回某個預設——那正好是「以為熔斷開著，其實沒有」。
+  assert.throws(
+    () => normalizeTokenRevocationConfig({ failureMode: "fail-closed" }),
+    /"failureMode" must be one of: closed, open/
+  );
+  assert.throws(
+    () => normalizeTokenRevocationConfig({ failureMode: true }),
+    /"failureMode" must be one of: closed, open/
+  );
+
+  assert.equal(
+    normalizeTokenRevocationConfig({ failureMode: "open" }).failureMode,
+    "open"
+  );
 });
 
 // --- 認證策略的整合 ----------------------------------------------------------
 
-function strategyWith({ claims, isRevoked, snapshotAgeSeconds = 5 }) {
+function strategyWith({
+  claims,
+  isRevoked,
+  snapshotAgeSeconds = 5,
+  snapshotUsable = true,
+  verify,
+  requestId = "req-1"
+}) {
   const logger = collectingLogger();
   const strategy = new JwtAuthStrategy({
     config: {},
@@ -338,15 +505,19 @@ function strategyWith({ claims, isRevoked, snapshotAgeSeconds = 5 }) {
           jwt: {
             headerName: "authorization",
             authScheme: "Bearer",
-            verify: () => claims
+            verify: verify ?? (() => claims)
           },
-          tokenRevocation: { isRevoked, snapshotAgeSeconds: () => snapshotAgeSeconds }
+          tokenRevocation: {
+            isRevoked,
+            snapshotAgeSeconds: () => snapshotAgeSeconds,
+            snapshotUsable: () => snapshotUsable
+          }
         })[name],
       get: (name) => (name === "logging" ? { logger } : undefined)
     }
   });
   const req = {
-    requestId: "req-1",
+    requestId,
     get: (name) => (name === "authorization" ? "Bearer some.token.value" : undefined)
   };
 
@@ -382,6 +553,86 @@ test("a revoked token is rejected with the same opaque code as any other failure
     logger.entries.some(({ event }) => event === "auth.jwt.rejected"),
     false
   );
+});
+
+test("an unusable snapshot rejects with 503, not 401", async () => {
+  const { strategy, req, logger } = strategyWith({
+    claims: { sub: "42", iat: 100 },
+    isRevoked: () => false,
+    snapshotUsable: false,
+    snapshotAgeSeconds: 3600
+  });
+
+  await assert.rejects(
+    () => strategy.authenticate(req),
+    (error) => {
+      // 401 是錯的答案：token 本身沒問題，是伺服器沒辦法判斷。回 401 會讓
+      // 客戶端丟掉憑證去重登，把一次撤銷故障放大成一場登入風暴。
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.code, "REVOCATION_UNAVAILABLE");
+      assert.equal(error.publicCode, "SERVICE_UNAVAILABLE");
+      // 而且不能是 AuthenticationError，否則 catch 會把它降級回 401。
+      assert.equal(error instanceof AuthenticationError, false);
+      return true;
+    }
+  );
+
+  const entry = logger.entries.find(
+    ({ event }) => event === "auth.revocation.circuit_open"
+  );
+  assert.equal(entry.level, "error");
+  assert.equal(entry.context.snapshotAgeSeconds, 3600);
+
+  // 熔斷不是一次驗證失敗，不該混進 auth.jwt.rejected 的計數裡。
+  assert.equal(
+    logger.entries.some(({ event }) => event === "auth.jwt.rejected"),
+    false
+  );
+});
+
+test("a known-revoked subject still gets 401 while the circuit is open", async () => {
+  // 過期的快照仍然可能已經記著這個 subject。那時「已撤銷」是比「無法判斷」
+  // 更準確的答案，而且是終局——沒有理由請對方稍後再試。
+  const { strategy, req } = strategyWith({
+    claims: { sub: "42", iat: 100 },
+    isRevoked: () => true,
+    snapshotUsable: false
+  });
+
+  await assert.rejects(
+    () => strategy.authenticate(req),
+    (error) => {
+      assert.equal(error instanceof AuthenticationError, true);
+      assert.equal(error.code, "JWT_INVALID");
+      assert.equal(error.statusCode, 401);
+      return true;
+    }
+  );
+});
+
+test("a rejection logs a null request id rather than dropping the entry", async () => {
+  // requestId 由中間件掛上，但策略不能假設它一定在——內部呼叫、或中間件順序
+  // 被改動時就沒有。這則日誌是「有人在偽造 token」唯一的紀錄，少了關聯 id
+  // 還是要記下來，不能整筆消失或炸掉。
+  const { strategy, req, logger } = strategyWith({
+    claims: { sub: "42", iat: 100 },
+    isRevoked: () => false,
+    requestId: null,
+    verify: () => {
+      const error = new Error("invalid signature");
+      error.name = "JsonWebTokenError";
+      throw error;
+    }
+  });
+
+  await assert.rejects(() => strategy.authenticate(req), (error) => {
+    assert.equal(error.code, "JWT_INVALID");
+    return true;
+  });
+
+  const entry = logger.entries.find(({ event }) => event === "auth.jwt.rejected");
+  assert.equal(entry.context.requestId, null);
+  assert.equal(entry.context.error.name, "JsonWebTokenError");
 });
 
 test("a token that is not revoked passes through untouched", async () => {

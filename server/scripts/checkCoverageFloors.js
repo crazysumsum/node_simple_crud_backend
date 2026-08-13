@@ -70,9 +70,21 @@ const FLOORS = {
     branches: 90,
     functions: 95
   },
-  // 撤銷壞掉的每一種形態都是安靜的：快照沒更新、切線算錯一秒、清理刪早了，
-  // 症狀全都是「已撤銷的 token 還能用」，不會有任何錯誤浮現。
-  "src/services/tokenRevocation/TokenRevocationService.js": { lines: 90, branches: 85 },
+  // 撤銷壞掉的每一種形態都是安靜的：快照沒更新、切線算錯一秒、清理刪早了、
+  // fail open 的上界比錯邊，症狀全都是「已撤銷的 token 還能用」，不會有任何
+  // 錯誤浮現。
+  "src/services/tokenRevocation/TokenRevocationService.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
+  // 熔斷的判斷住在這裡。回 401 而不是 503、或是漏掉快照可用性這一問，兩者
+  // 都不會讓任何測試以外的東西出聲。
+  "src/services/auth/jwtAuthStrategy.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
   // 每請求 service scope 的拆解。這裡的洩漏是安靜且累積的——scope 沒關就是
   // request-scoped 的資源一路留著，症狀要跑上幾天才顯現，而那時已經沒有線索
   // 指回這個中間件。拆解本身還跑在回應送出之後，那裡拋錯沒有人接得住。

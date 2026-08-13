@@ -44,7 +44,11 @@ const strategyContainer = await createServiceContainer({
     logging: { logger: silentLogger },
     // 撤銷檢查在 auth.jwt 裡，但這個檔案測的是 dispatcher 的分派與授權。
     // 撤銷本身有自己的測試，這裡用「什麼都沒被撤銷」的替身。
-    tokenRevocation: { isRevoked: () => false, snapshotAgeSeconds: () => 0 }
+    tokenRevocation: {
+      isRevoked: () => false,
+      snapshotAgeSeconds: () => 0,
+      snapshotUsable: () => true
+    }
   },
   discoveryOptions: {
     servicesDirectory: new URL("../src/services/auth/", import.meta.url)

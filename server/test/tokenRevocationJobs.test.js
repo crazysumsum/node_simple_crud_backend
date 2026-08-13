@@ -20,7 +20,11 @@ function silentLogger() {
   return { debug: noop, info: noop, warn: noop, error: noop };
 }
 
-function createRefreshJob({ intervalMs, maxStalenessSeconds = 60 } = {}) {
+function createRefreshJob({
+  intervalMs,
+  maxStalenessSeconds = 60,
+  refreshResult = true
+} = {}) {
   const refreshed = [];
   const scheduler = fakeScheduler();
   const config = {
@@ -37,6 +41,7 @@ function createRefreshJob({ intervalMs, maxStalenessSeconds = 60 } = {}) {
           tokenRevocation: {
             async refresh() {
               refreshed.push("refresh");
+              return refreshResult;
             }
           },
           scheduler,
@@ -165,6 +170,21 @@ test("running each job reaches the revocation service", async () => {
 
   assert.deepEqual(refresh.refreshed, ["refresh"]);
   assert.deepEqual(purge.purged, ["purge"]);
+});
+
+test("a refresh that fails open still fails the job", async () => {
+  // refresh() 刻意吞掉例外——快照失效時繼續服務是設計。但排程器必須知道，
+  // 否則 fr_scheduler_stats 上的 lastOutcome 會一路 succeeded，撤銷死了幾個
+  // 小時而那張專門為了看見工作異常而建的表看不見它。
+  const { job, refreshed } = createRefreshJob({ refreshResult: false });
+
+  await assert.rejects(
+    () => job.run(),
+    /Token revocation snapshot refresh failed/
+  );
+
+  // 而且要真的試過才失敗，不是繞過刷新直接報錯。
+  assert.deepEqual(refreshed, ["refresh"]);
 });
 
 test("both jobs are discovered by the ordinary service mechanism", async () => {

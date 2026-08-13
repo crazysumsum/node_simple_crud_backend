@@ -1,3 +1,4 @@
+import { ApplicationError } from "../../framework/errors/ApplicationError.js";
 import { AuthenticationError } from "../../framework/auth/AuthenticationError.js";
 import { BaseAuthStrategy } from "../../framework/auth/BaseAuthStrategy.js";
 
@@ -55,11 +56,43 @@ export class JwtAuthStrategy extends BaseAuthStrategy {
         throw new AuthenticationError("JWT_INVALID", "JWT is invalid or expired");
       }
 
+      // 快照過期的檢查排在撤銷判定之後：舊快照仍然可能已經記著這個 subject，
+      // 那時「已撤銷」是比「無法判斷」更準確的答案。
+      if (!this.tokenRevocation.snapshotUsable()) {
+        // 401 是錯的答案。token 本身沒問題，是伺服器沒辦法判斷它有沒有被撤銷。
+        // 回 401 會讓客戶端丟掉憑證去重新登入，把一次撤銷故障放大成一場登入
+        // 風暴；503 說的是「這是伺服器的問題，稍後再試」，憑證留著。
+        //
+        // 只有 authType 是 jwt 的 route 受影響。public route——登入、/health
+        // ——照常運作，恢復手段不會被一起鎖掉。
+        void this.logger?.error?.(
+          "auth.revocation.circuit_open",
+          "Rejecting authenticated requests: the revocation snapshot is too stale to trust",
+          {
+            requestId: req.requestId || null,
+            snapshotAgeSeconds: this.tokenRevocation.snapshotAgeSeconds()
+          }
+        );
+        throw new ApplicationError(
+          "Token revocation snapshot is too stale to trust",
+          {
+            code: "REVOCATION_UNAVAILABLE",
+            statusCode: 503,
+            publicCode: "SERVICE_UNAVAILABLE",
+            publicMessage: "Service unavailable"
+          }
+        );
+      }
+
       return { type: this.authType, claims };
     } catch (error) {
-      // 撤銷判定已經是最終結論，不該被下面的 catch 重新包裝成「驗證失敗」，
+      // 上面刻意丟出來的錯誤都已經是最終結論，不該被重新包裝成「驗證失敗」，
       // 那會多記一筆誤導的 auth.jwt.rejected。
-      if (error instanceof AuthenticationError) {
+      //
+      // 這裡認的是 ApplicationError 而不是 AuthenticationError：熔斷丟的是
+      // 503，繼承關係上它不是 AuthenticationError，只認後者的話 503 會在這裡
+      // 被降級成 401——正好是熔斷要避免的那個後果。
+      if (error instanceof ApplicationError) {
         throw error;
       }
 

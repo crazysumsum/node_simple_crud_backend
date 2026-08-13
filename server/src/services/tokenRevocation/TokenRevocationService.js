@@ -17,7 +17,8 @@ const SQL_FILE = "server/database/framework/jwt.sql";
  *
  * 代價是撤銷有延遲上界，等於刷新間隔。那個上界是明碼寫出來的設定
  * （maxStalenessSeconds），而且啟動時會與實際的刷新間隔交叉檢查，不會變成一個
- * 只有讀原始碼才知道的數字。
+ * 只有讀原始碼才知道的數字。刷新失敗時舊快照還能撐多久，同樣是設定
+ * （maxFailOpenSeconds），超過就熔斷——見 snapshotUsable()。
  *
  * 這個 service 只提供能力，不決定什麼時候撤銷。登出、強制下線、改密碼這些
  * 觸發點屬於業務 handler，注入它並呼叫 revoke() 即可。
@@ -128,14 +129,35 @@ export class TokenRevocationService extends BaseService {
    *
    * 失敗時 fail open：保留舊快照繼續服務，已撤銷的 token 會在資料庫恢復之前
    * 繼續有效。反過來（fail closed）會讓一次資料庫抖動變成全站登出，把認證服務
-   * 變成 DoS 放大器；而這裡的攻擊窗口上界是故障時長，且攻擊者需要一個「已經
-   * 被撤銷」的 token 才吃得到。
+   * 變成 DoS 放大器。
    *
-   * fail open 的前提是失效看得見，所以失敗記 error，並附上快照年齡。
+   * 但這個理由只對「抖動」成立，所以 fail open 有時間盒：快照超過
+   * maxFailOpenSeconds 之後由 snapshotUsable() 熔斷。沒有上界的話，一張單獨
+   * 壞掉的表就能讓撤銷靜默失效好幾個小時——其餘 SQL 照常，/health 是綠的。
+   *
+   * fail open 的前提是失效看得見，所以失敗記 error 並附上快照年齡，而且
+   * TokenRevocationRefreshJob 會把它變成一次失敗的工作，寫進排程器的統計表。
    */
   async refresh() {
     try {
       await this.load();
+
+      // 沒有這則日誌的話，「一片 error 之後恢復」與「一片 error 之後行程死掉」
+      // 在日誌上長得一模一樣。停擺多久也只有這裡答得出來。
+      if (this.lastFailureAtMs !== null) {
+        await this.logger.info(
+          "auth.revocation.recovered",
+          "Token revocation snapshot refresh recovered",
+          {
+            outageSeconds: Math.max(
+              0,
+              Math.round((this.time.nowMs() - this.lastFailureAtMs) / 1000)
+            ),
+            cachedSubjects: this.snapshot.size
+          }
+        );
+      }
+
       this.lastFailureAtMs = null;
       return true;
     } catch (error) {
@@ -152,6 +174,25 @@ export class TokenRevocationService extends BaseService {
       );
       return false;
     }
+  }
+
+  /**
+   * 快照是否還在可信範圍內。false 代表撤銷判斷已經不能當數。
+   *
+   * isRevoked() 刻意不看年齡——它回答的是「這條切線怎麼說」，那是一個純粹的
+   * 比較。快照本身還算不算數是另一個問題，答錯的後果也不同（一個是放行錯的
+   * 人，一個是整批人進不來），所以分成兩個問題問。
+   */
+  snapshotUsable() {
+    if (this.loadedAtMs === null) {
+      return false;
+    }
+
+    if (this.revocationConfig.failureMode === "open") {
+      return true;
+    }
+
+    return this.snapshotAgeSeconds() <= this.revocationConfig.maxFailOpenSeconds;
   }
 
   /** 快照距離上次成功載入過了多久（秒）。從未載入成功時回傳 null。 */
