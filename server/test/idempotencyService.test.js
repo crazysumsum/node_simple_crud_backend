@@ -37,6 +37,7 @@ function recordingStore(behaviour = {}) {
       return behaviour.begin ? behaviour.begin(key, options) : { state: "started" };
     },
     complete: behaviour.complete || (async () => {}),
+    markUnavailable: behaviour.markUnavailable || (async () => {}),
     fail: behaviour.fail || (async () => {}),
     close: async () => {}
   };
@@ -324,14 +325,129 @@ test("a non-cacheable status releases the key instead of caching it", async () =
   assert.equal(released.length, 1);
 });
 
-test("a handler that writes no body releases the key", async () => {
+// --- 成功了但回應存不下來 --------------------------------------------------------
+//
+// 三條路徑（沒有 body、complete() 失敗、回應過大）先前都走 fail()，也就是把 key
+// 釋放掉。那讓客戶端可以重試並拿到一個回應——代價是已經成功的業務操作再執行
+// 一次，而客戶端兩次都看到成功。
+
+test("a success with no captured body is closed, not released", async () => {
   const released = [];
-  const store = recordingStore({ fail: async (key) => released.push(key) });
+  const closed = [];
+  const store = recordingStore({
+    fail: async (key) => released.push(key),
+    markUnavailable: async (key, options) => closed.push({ key, ...options })
+  });
   const { manager } = createManager(store);
 
+  // 檔案下載走 res.end()，不經 res.json()，所以沒有 body 可以快取。但業務操作
+  // 確實做完了——釋放 key 等於允許它再做一次。
   await manager.execute(createRequest(), createResponse(), routeOptions, () => "no body");
 
+  assert.deepEqual(released, []);
+  assert.deepEqual(closed, [{ key: closed[0]?.key, ttlMs: routeOptions.ttlMs }]);
+});
+
+test("a response that cannot be stored is closed, not released", async () => {
+  const released = [];
+  const closed = [];
+  const store = recordingStore({
+    complete: async () => {
+      throw new Error("connect ECONNREFUSED");
+    },
+    fail: async (key) => released.push(key),
+    markUnavailable: async (key) => closed.push(key)
+  });
+  const { manager, logger } = createManager(store);
+  const res = createResponse();
+
+  const result = await manager.execute(createRequest(), res, routeOptions, () => {
+    res.status(201).json({ id: 1 });
+    return "done";
+  });
+
+  // 業務操作成功了，客戶端照常收到 201——把它改成錯誤只會保證客戶端重試。
+  assert.equal(result, "done");
+  assert.deepEqual(released, []);
+  assert.equal(closed.length, 1);
+  assert.ok(
+    logger.entries.some((entry) => entry.event === "idempotency.store.complete_failed")
+  );
+});
+
+test("a non-cacheable status is still released, because it did not succeed", async () => {
+  const released = [];
+  const closed = [];
+  const store = recordingStore({
+    fail: async (key) => released.push(key),
+    markUnavailable: async (key) => closed.push(key)
+  });
+  const { manager } = createManager(store);
+  const res = createResponse();
+
+  await manager.execute(createRequest(), res, routeOptions, () => {
+    res.status(422).json({ error: "invalid" });
+  });
+
+  // 這是 fail() 唯一還該出現在成功路徑上的地方：客戶端修正輸入後重試，必須
+  // 能重新執行。先前這一條與「成功但存不下來」共用同一個 else 分支。
   assert.equal(released.length, 1);
+  assert.deepEqual(closed, []);
+});
+
+test("a retry of a key whose response was lost is refused, not re-executed", async () => {
+  const store = recordingStore({
+    begin: async () => ({ state: "completedWithoutResponse" })
+  });
+  const { manager, logger } = createManager(store);
+  let ran = false;
+
+  await assert.rejects(
+    () =>
+      manager.execute(createRequest(), createResponse(), routeOptions, () => {
+        ran = true;
+      }),
+    (error) => {
+      assert.equal(error.code, "IDEMPOTENCY_RESULT_UNAVAILABLE");
+      assert.equal(error.statusCode, 409);
+      assert.match(error.message, /Do not retry/);
+      return true;
+    }
+  );
+
+  // 整個狀態存在的理由就是這一行。
+  assert.equal(ran, false, "已經成功過的業務操作絕不能再跑一次");
+  assert.ok(
+    logger.entries.some((entry) => entry.event === "idempotency.response.unavailable")
+  );
+});
+
+test("a store that cannot even close the key says so at error level", async () => {
+  const store = recordingStore({
+    complete: async () => {
+      throw new Error("connect ECONNREFUSED");
+    },
+    markUnavailable: async () => {
+      throw new Error("still down");
+    }
+  });
+  const { manager, logger } = createManager(store);
+  const res = createResponse();
+
+  // 這是唯一無法再往下收斂的殘餘情況：列留在 pending，重試在租約到期後仍會
+  // 重新執行。救它需要業務操作與 idempotency 寫入在同一個交易裡，而框架管不到
+  // handler 的交易邊界。所以它必須看得見。
+  const result = await manager.execute(createRequest(), res, routeOptions, () => {
+    res.status(201).json({ id: 1 });
+    return "done";
+  });
+
+  assert.equal(result, "done");
+  const entry = logger.entries.find(
+    (candidate) => candidate.event === "idempotency.store.mark_unavailable_failed"
+  );
+  assert.equal(entry.level, "error");
+  assert.equal(entry.context.reason, "store_failed");
 });
 
 test("res.json is restored after execute, cached or not", async () => {

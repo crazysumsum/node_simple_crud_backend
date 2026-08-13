@@ -103,6 +103,12 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
       return { state: "inProgress" };
     }
 
+    // 成功執行過，但回應沒有保存。不能當成 replay——那會回一個空 body 給
+    // 客戶端，讓它以為那就是原本的回應。
+    if (row.state === "unavailable") {
+      return { state: "completedWithoutResponse" };
+    }
+
     return {
       state: "replay",
       response: {
@@ -135,9 +141,11 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
     const body = response.body === undefined ? null : JSON.stringify(response.body);
 
     if (body !== null && Buffer.byteLength(body, "utf8") > this.maxResponseBytes) {
-      // 不快取，但也不能讓列留在 pending——那會讓重試在租約到期前一路 409。
-      // 釋放掉，重試會重新執行 handler。
-      await this.fail(key);
+      // 只拋錯，不動那一列。先前這裡會先 fail()——也就是釋放 key——好讓重試
+      // 拿得到一個回應，代價是已經成功的業務操作再執行一次。那不是罕見的
+      // 競態，是任何回應超過上限的 route 每一次都會發生的事。
+      //
+      // 現在由呼叫端決定怎麼收尾（markUnavailable），store 不做策略決定。
       throw new Error(
         `Idempotent response is ${Buffer.byteLength(body, "utf8")} bytes, over the ${this.maxResponseBytes} byte limit`
       );
@@ -154,6 +162,25 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
            expires_at = UNIX_TIMESTAMP() + ?
        WHERE store_key = ? AND state = 'pending'`,
       [Number(response.statusCode), body, this.leaseSeconds(ttlMs), key]
+    );
+  }
+
+  /**
+   * 記下「成功執行完，但回應沒有保存」。expires_at 用完整的 TTL——租約的作用是
+   * 讓崩潰的實例解鎖，而這裡已經確定執行完了。
+   */
+  async markUnavailable(key, { ttlMs }) {
+    // state='pending' 這個條件與 complete() 同一個理由：只有仍在處理中的列
+    // 該被改寫。把一個已經 completed 的列降級成 unavailable，等於丟掉一個
+    // 還能重播的回應。
+    await this.database.execute(
+      `UPDATE ${TABLE}
+       SET state = 'unavailable',
+           status_code = NULL,
+           response = NULL,
+           expires_at = UNIX_TIMESTAMP() + ?
+       WHERE store_key = ? AND state = 'pending'`,
+      [this.leaseSeconds(ttlMs), key]
     );
   }
 

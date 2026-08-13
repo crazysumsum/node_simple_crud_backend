@@ -88,7 +88,11 @@ function fakeDatabase({ dbNowSeconds = 1000 } = {}) {
     }
 
     if (text.startsWith("UPDATE fr_idempotency_keys")) {
-      const [status_code, response, ttlSeconds, store_key] = params;
+      // 目標狀態從 SET 子句讀出來，而不是寫死成 completed：complete() 與
+      // markUnavailable() 都走這個分支，寫死的話後者會被當成前者，測試就看不出
+      // 兩者的差別。
+      const targetState = text.match(/SET state = '(\w+)'/)[1];
+      const store_key = params.at(-1);
       const row = rows.get(store_key);
       const guardsPending = text.includes("state = 'pending'");
 
@@ -96,10 +100,12 @@ function fakeDatabase({ dbNowSeconds = 1000 } = {}) {
         return [{ affectedRows: 0 }];
       }
 
+      const ttlSeconds = params.at(-2);
       Object.assign(row, {
-        state: "completed",
-        status_code,
-        response,
+        state: targetState,
+        // 跟其他分支同一個原則：只有 SQL 真的寫了才套用。
+        status_code: text.includes("status_code = NULL") ? null : params[0],
+        response: text.includes("response = NULL") ? null : params[1],
         expires_at: state.dbNowSeconds + ttlSeconds
       });
       return [{ affectedRows: 1 }];
@@ -265,7 +271,7 @@ test("failing a key releases it, but never deletes a completed record", async ()
 
 // --- 回應體積 ----------------------------------------------------------------
 
-test("an oversized response releases the key instead of being cached", async () => {
+test("an oversized response is refused without touching the row", async () => {
   const { store, database } = createStore({ maxResponseBytes: 64 });
 
   await store.begin("k", OPTIONS);
@@ -275,9 +281,57 @@ test("an oversized response releases the key instead of being cached", async () 
     /over the 64 byte limit/
   );
 
-  // 留在 pending 的話，重試會一路 409 到租約到期。釋放掉，重試重新執行。
-  assert.equal(database.rows.has("k"), false);
-  assert.deepEqual(await store.begin("k", OPTIONS), { state: "started" });
+  // 先前這裡會 fail()——釋放 key，好讓重試拿得到一個回應，代價是已經成功的
+  // 業務操作再執行一次。那不是罕見的競態：任何回應超過上限的 route 每一次都
+  // 會走到這裡。收尾是呼叫端的決定，store 不做策略。
+  assert.equal(database.rows.get("k").state, "pending");
+});
+
+test("marking a key unavailable stops a retry from executing it again", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", OPTIONS);
+  await store.markUnavailable("k", { ttlMs: 60000 });
+
+  const row = database.rows.get("k");
+  assert.equal(row.state, "unavailable");
+  assert.equal(row.status_code, null);
+  assert.equal(row.response, null);
+
+  // 這一列存在的唯一理由：讓重試拿到 409 而不是 started。
+  assert.deepEqual(await store.begin("k", OPTIONS), {
+    state: "completedWithoutResponse"
+  });
+});
+
+test("marking unavailable uses the full ttl, not the pending lease", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", { ...OPTIONS, ttlMs: 3_600_000, pendingLeaseMs: 5000 });
+  const leaseExpiry = database.rows.get("k").expires_at;
+  await store.markUnavailable("k", { ttlMs: 3_600_000 });
+
+  // 租約的作用是讓崩潰的實例解鎖；這裡已經確定執行完了，這一列要活到重播窗口
+  // 結束為止。沿用租約的話，保護會在幾秒後就消失。
+  assert.ok(
+    database.rows.get("k").expires_at > leaseExpiry,
+    "unavailable 的存活時間必須長於 pending 租約"
+  );
+});
+
+test("marking unavailable never downgrades an already cached response", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", OPTIONS);
+  await store.complete("k", { statusCode: 201, body: { id: 7 } }, { ttlMs: 60000 });
+  // 晚到的一次呼叫不能把一個還能重播的回應改成「回應不見了」。
+  await store.markUnavailable("k", { ttlMs: 60000 });
+
+  assert.equal(database.rows.get("k").state, "completed");
+  assert.deepEqual(await store.begin("k", OPTIONS), {
+    state: "replay",
+    response: { statusCode: 201, body: { id: 7 } }
+  });
 });
 
 // --- 清理 --------------------------------------------------------------------
