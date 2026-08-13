@@ -9,8 +9,31 @@ import { createTestTime, servicesWithTime } from "../test-support/createTestTime
 
 const config = {
   queryTimeoutMs: 2500,
-  transactionTimeoutMs: 5000
+  acquireTimeoutMs: 5000,
+  transactionTimeoutMs: 5000,
+  abandonedConnectionAction: "destroy"
 };
+
+/** 每一句 query/execute 現在都自己借還一條連線，所以 pool 替身要能借出來。 */
+function lendable(pool) {
+  const lent = { release: 0, destroy: 0 };
+  return {
+    lent,
+    pool: {
+      ...pool,
+      getConnection: async () => ({
+        query: pool.query,
+        execute: pool.execute,
+        release: () => {
+          lent.release += 1;
+        },
+        destroy: () => {
+          lent.destroy += 1;
+        }
+      })
+    }
+  };
+}
 
 const silentLogger = {
   debug: async () => {},
@@ -22,13 +45,13 @@ const context = new RequestContextService({
 
 test("MySQL database service verifies connectivity during initialization", async () => {
   const calls = [];
-  const pool = {
+  const { pool } = lendable({
     query: async (...args) => {
       calls.push(args);
       return [[{ ok: 1 }]];
     },
     end: async () => {}
-  };
+  });
   const database = new MySqlDatabaseService({
     pool,
     config,
@@ -45,10 +68,10 @@ test("MySQL database service verifies connectivity during initialization", async
 
 test("MySQL database service rejects an invalid initialization health result", async () => {
   const database = new MySqlDatabaseService({
-    pool: {
+    pool: lendable({
       query: async () => [[{ ok: 0 }]],
       end: async () => {}
-    },
+    }).pool,
     config,
     logger: silentLogger,
     context
@@ -65,7 +88,7 @@ test("MySQL database service rejects an invalid initialization health result", a
 
 test("MySQL database service applies query timeouts and parameterized execution", async () => {
   const calls = [];
-  const pool = {
+  const { pool, lent } = lendable({
     query: async (...args) => {
       calls.push(["query", ...args]);
       return [[{ id: 7 }]];
@@ -75,7 +98,7 @@ test("MySQL database service applies query timeouts and parameterized execution"
       return [{ affectedRows: 1 }];
     },
     end: async () => {}
-  };
+  });
   const database = new MySqlDatabaseService({ pool, config, logger: silentLogger, context });
 
   const [rows] = await database.query("SELECT id FROM users WHERE id = ?", [7]);
@@ -95,6 +118,8 @@ test("MySQL database service applies query timeouts and parameterized execution"
     { sql: "UPDATE users SET active = ? WHERE id = ?", timeout: 1000 },
     [true, 7]
   ]);
+  // 成功的查詢一律還回池子，不管 abandonedConnectionAction 設什麼。
+  assert.deepEqual(lent, { release: 2, destroy: 0 });
 });
 
 test("MySQL database service commits successful transactions and releases connections", async () => {

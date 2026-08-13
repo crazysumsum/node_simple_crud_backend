@@ -14,6 +14,20 @@ function integer(value, key, { minimum = 0, maximum } = {}) {
   return number;
 }
 
+function abandonedConnectionAction(value) {
+  const action = String(value ?? "destroy");
+
+  if (!ABANDONED_CONNECTION_ACTIONS.has(action)) {
+    throw new Error(
+      `Database config "abandonedConnectionAction" must be one of: ${[
+        ...ABANDONED_CONNECTION_ACTIONS
+      ].join(", ")}`
+    );
+  }
+
+  return action;
+}
+
 function requiredText(value, key) {
   const text = String(value || "").trim();
 
@@ -23,6 +37,8 @@ function requiredText(value, key) {
 
   return text;
 }
+
+const ABANDONED_CONNECTION_ACTIONS = new Set(["destroy", "release"]);
 
 export function normalizeDatabaseConfig(source) {
   const socketPath = source?.socketPath
@@ -42,10 +58,18 @@ export function normalizeDatabaseConfig(source) {
     connectionLimit: integer(source?.connectionLimit, "connectionLimit", {
       minimum: 1
     }),
-    queueLimit: integer(source?.queueLimit, "queueLimit"),
+    // 下限 1 而不是 0：0 是 mysql2 的「不限制」，也就是等待者無上限累積。
+    // 那是這個框架不接受的預設，所以連寫都不讓寫。
+    queueLimit: integer(source?.queueLimit, "queueLimit", { minimum: 1 }),
+    acquireTimeoutMs: integer(source?.acquireTimeoutMs, "acquireTimeoutMs", {
+      minimum: 1
+    }),
     queryTimeoutMs: integer(source?.queryTimeoutMs, "queryTimeoutMs", {
       minimum: 1
     }),
+    abandonedConnectionAction: abandonedConnectionAction(
+      source?.abandonedConnectionAction
+    ),
     transactionTimeoutMs: integer(
       source?.transactionTimeoutMs,
       "transactionTimeoutMs",

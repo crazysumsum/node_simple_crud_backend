@@ -6,22 +6,44 @@
  * function" 的形式炸在無關的測試裡。
  *
  * 啟動路徑上真正會用到的是：
- *   query()   連線驗證、撤銷名單首次載入
- *   execute() cluster 工作的租約 prepare、撤銷名單清理
- *   end()     關機
+ *   query()          連線驗證、撤銷名單首次載入
+ *   execute()        cluster 工作的租約 prepare、撤銷名單清理
+ *   getConnection()  每一句 query/execute 現在都自己借還一條連線
+ *   end()            關機
  */
 export function fakeMySqlPool({ query, execute, end, rows = [{ ok: 1 }] } = {}) {
-  const calls = { query: 0, execute: 0, end: 0 };
+  const calls = { query: 0, execute: 0, end: 0, getConnection: 0, release: 0, destroy: 0 };
+
+  const runQuery = async (...args) => {
+    calls.query += 1;
+    return query ? query(...args) : [rows];
+  };
+  const runExecute = async (...args) => {
+    calls.execute += 1;
+    return execute ? execute(...args) : [{ affectedRows: 0 }];
+  };
 
   return {
     calls,
-    query: async (...args) => {
-      calls.query += 1;
-      return query ? query(...args) : [rows];
-    },
-    execute: async (...args) => {
-      calls.execute += 1;
-      return execute ? execute(...args) : [{ affectedRows: 0 }];
+    query: runQuery,
+    execute: runExecute,
+    // 借出來的連線共用同一組 query/execute，所以既有測試對 calls.query 的
+    // 斷言不受影響；release/destroy 另外計數，讓「逾時之後怎麼還」測得到。
+    getConnection: async () => {
+      calls.getConnection += 1;
+      return {
+        query: runQuery,
+        execute: runExecute,
+        release: () => {
+          calls.release += 1;
+        },
+        destroy: () => {
+          calls.destroy += 1;
+        },
+        beginTransaction: async () => {},
+        commit: async () => {},
+        rollback: async () => {}
+      };
     },
     end: async (...args) => {
       calls.end += 1;
