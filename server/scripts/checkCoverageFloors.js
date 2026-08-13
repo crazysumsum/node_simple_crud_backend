@@ -63,7 +63,23 @@ const FLOORS = {
   },
   // 撤銷壞掉的每一種形態都是安靜的：快照沒更新、切線算錯一秒、清理刪早了，
   // 症狀全都是「已撤銷的 token 還能用」，不會有任何錯誤浮現。
-  "src/services/tokenRevocation/TokenRevocationService.js": { lines: 90, branches: 85 }
+  "src/services/tokenRevocation/TokenRevocationService.js": { lines: 90, branches: 85 },
+  // 每請求 service scope 的拆解。這裡的洩漏是安靜且累積的——scope 沒關就是
+  // request-scoped 的資源一路留著，症狀要跑上幾天才顯現，而那時已經沒有線索
+  // 指回這個中間件。拆解本身還跑在回應送出之後，那裡拋錯沒有人接得住。
+  "src/framework/services/requestServiceScope.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
+  // 設定正規化器多數不需要下限：它們在啟動時執行，寫錯會立刻炸。這一個是
+  // 例外——它守的是 CORS 白名單與 trustProxy 跳數，而放寬檢查的後果（萬用
+  // 字元 origin 通過、trustProxy 接受 true）不會有任何啟動期症狀。
+  "src/framework/security/normalizeSecurityConfig.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  }
 };
 
 const serverRoot = fileURLToPath(new URL("../", import.meta.url));
