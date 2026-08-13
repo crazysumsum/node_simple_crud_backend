@@ -1,3 +1,4 @@
+import http from "node:http";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -16,6 +17,7 @@ import {
   createApiDispatcher,
   validateApiConfig
 } from "../middleware/apiDispatcher.js";
+import { createBodyReceiveTimeoutMiddleware } from "../middleware/bodyReceiveTimeout.js";
 import { createErrorHandler } from "../middleware/errorHandler.js";
 import { sendError } from "../http/apiResponse.js";
 import {
@@ -75,6 +77,41 @@ function closeHttpServer(server, timeoutMs) {
   );
 }
 
+const BYTE_UNITS = Object.freeze({ b: 1, kb: 1024, mb: 1024 * 1024 });
+
+/** "100kb" -> 102400。格式已由 normalizeSecurityConfig 驗證過。 */
+function bytesFromLimit(limit) {
+  const [, amount, unit] = /^(\d+)(b|kb|mb)$/.exec(String(limit)) ?? [];
+  return amount ? Number(amount) * BYTE_UNITS[unit] : null;
+}
+
+/**
+ * 把四個逾時換算成部署者真正關心的三件事：JSON 請求的最低速率要求、socket 層
+ * 逾時的實際生效上界，以及一個請求最多能佔住限流槽位多久。
+ */
+function describeRequestBudget(application, jsonBodyLimit) {
+  const jsonBodyLimitBytes = bytesFromLimit(jsonBodyLimit);
+  const seconds = application.bodyReceiveTimeoutMs / 1000;
+
+  return {
+    jsonBodyLimit,
+    bodyReceiveTimeoutMs: application.bodyReceiveTimeoutMs,
+    // 低於這個速率的 JSON 請求會被看門狗切斷。
+    minimumJsonBodyBytesPerSecond:
+      jsonBodyLimitBytes === null ? null : Math.ceil(jsonBodyLimitBytes / seconds),
+    // 設定值加上檢查間隔，才是連線真的會被切斷的最晚時間。
+    effectiveHeadersTimeoutMs:
+      application.headersReceiveTimeoutMs + application.connectionsCheckingIntervalMs,
+    effectiveRequestReceiveTimeoutMs:
+      application.requestReceiveTimeoutMs + application.connectionsCheckingIntervalMs,
+    // 收取與處理是連續的兩段，一個請求佔住限流槽位的時間上界是兩段相加。
+    maxSlotHoldMs:
+      application.requestReceiveTimeoutMs +
+      application.connectionsCheckingIntervalMs +
+      application.requestTimeoutMs
+  };
+}
+
 class Application {
   constructor({
     app,
@@ -126,10 +163,19 @@ class Application {
       throw new Error("Application startup was cancelled");
     }
 
+    // 自己建 server 而不是 app.listen()：這三個值只有在 createServer 的時候
+    // 設得進去。實測 listen() 之後才指派 requestTimeout 完全無效——連線在跨過
+    // 兩次檢查間隔、75 秒之後仍然活著。
     this.server = await new Promise((resolve, reject) => {
-      const server = this.app.listen(application.port, application.host, () => {
-        resolve(server);
-      });
+      const server = http.createServer(
+        {
+          requestTimeout: application.requestReceiveTimeoutMs,
+          headersTimeout: application.headersReceiveTimeoutMs,
+          connectionsCheckingInterval: application.connectionsCheckingIntervalMs
+        },
+        this.app
+      );
+      server.listen(application.port, application.host, () => resolve(server));
       server.once("error", reject);
     });
     this.state = "started";
@@ -143,7 +189,13 @@ class Application {
     await this.logger.info("application.started", "API application started", {
       startupTime,
       startedTime: this.time.timestamp(),
-      url
+      url,
+      // 這四個逾時的實際效果沒有人會自己算，而算錯的後果是安靜的：某一段沒有
+      // 上限，或某個設定值從此是空話。所以啟動時把換算結果講出來。
+      requestBudget: describeRequestBudget(
+        application,
+        this.configuration.security.jsonBodyLimit
+      )
     });
 
     return Object.freeze({ server: this.server, url });
@@ -422,7 +474,8 @@ export async function createApplication({
       time,
       fileTypes,
       apiUpload: configuration.api.upload,
-      defaultRequestTimeoutMs: configuration.application.requestTimeoutMs
+      defaultRequestTimeoutMs: configuration.application.requestTimeoutMs,
+      requestReceiveTimeoutMs: configuration.application.requestReceiveTimeoutMs
     });
     const app = express();
     const { security } = configuration;
@@ -462,6 +515,15 @@ export async function createApplication({
         context,
         logger: activeLogger,
         shutdownTimeoutMs: configuration.application.shutdownTimeoutMs
+      })
+    );
+    // 排在 express.json() 之前：它守的正是「限流槽位已被佔住、body 還沒收完」
+    // 那一段，而 express.json() 就是那一段唯一會阻塞的東西。
+    app.use(
+      createBodyReceiveTimeoutMiddleware({
+        timeoutMs: configuration.application.bodyReceiveTimeoutMs,
+        logger: activeLogger,
+        time
       })
     );
     app.use(express.json({ limit: security.jsonBodyLimit }));

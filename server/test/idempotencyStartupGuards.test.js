@@ -38,7 +38,11 @@ function route(overrides = {}) {
 
 const handlers = { createOrder: new OrderHandler("createOrder", { logger: null }) };
 
-function validate(routes, idempotency, { defaultRequestTimeoutMs = 30000 } = {}) {
+function validate(
+  routes,
+  idempotency,
+  { defaultRequestTimeoutMs = 30000, requestReceiveTimeoutMs = 120000 } = {}
+) {
   return validateApiConfig(
     routes,
     handlers,
@@ -46,7 +50,8 @@ function validate(routes, idempotency, { defaultRequestTimeoutMs = 30000 } = {})
     defaultRequestTimeoutMs,
     undefined,
     undefined,
-    idempotency
+    idempotency,
+    requestReceiveTimeoutMs
   );
 }
 
@@ -108,8 +113,11 @@ test("the check also covers routes that inherit the application timeout", () => 
 });
 
 test("a route without idempotency is not subject to the lease check", () => {
+  // 這個 timeoutMs 大於租約，開著 idempotency 的話會被上面那道檢查擋下。
+  // 不能再用 999999——那會撞上 requestReceiveTimeoutMs 的檢查，測到的就變成
+  // 另一件事了。
   validate(
-    [route({ idempotency: { enabled: false }, timeoutMs: 999999 })],
+    [route({ idempotency: { enabled: false }, timeoutMs: 120000 })],
     service(120000)
   );
 });

@@ -290,6 +290,10 @@ const VALID_APPLICATION = Object.freeze({
   port: 3000,
   timeZone: "Asia/Hong_Kong",
   requestTimeoutMs: 30000,
+  requestReceiveTimeoutMs: 120000,
+  headersReceiveTimeoutMs: 10000,
+  bodyReceiveTimeoutMs: 10000,
+  connectionsCheckingIntervalMs: 2000,
   shutdownTimeoutMs: 30000
 });
 
@@ -338,7 +342,14 @@ test("application config keeps the port inside the range a port can have", () =>
 });
 
 test("application config rejects non-positive timeouts", () => {
-  for (const key of ["requestTimeoutMs", "shutdownTimeoutMs"]) {
+  for (const key of [
+    "requestTimeoutMs",
+    "requestReceiveTimeoutMs",
+    "headersReceiveTimeoutMs",
+    "bodyReceiveTimeoutMs",
+    "connectionsCheckingIntervalMs",
+    "shutdownTimeoutMs"
+  ]) {
     for (const value of [0, -1, 1.5, "soon", undefined]) {
       assert.throws(
         () => normalizeApplicationConfig({ ...VALID_APPLICATION, [key]: value }),

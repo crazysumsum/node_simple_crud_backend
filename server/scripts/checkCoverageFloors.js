@@ -93,6 +93,21 @@ const FLOORS = {
     branches: 95,
     functions: 95
   },
+  // 唯一守著「限流槽位已佔住、body 還沒收完」那一段的東西。它沒生效的症狀是
+  // 幾個位元組就能佔住一個槽位，而 handler 從未執行，所以沒有任何逾時會觸發，
+  // 日誌上也看不出異常——與「服務忙碌」無法區分。
+  "src/framework/middleware/bodyReceiveTimeout.js": {
+    lines: 95,
+    branches: 90,
+    functions: 95
+  },
+  // 四個逾時的關係鏈。排錯不會報錯，只會讓某一段沒有上限，或讓某個設定值從此
+  // 是一句空話。
+  "src/framework/configuration/normalizeApplicationConfig.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
   // 設定正規化器多數不需要下限：它們在啟動時執行，寫錯會立刻炸。這一個是
   // 例外——它守的是 CORS 白名單與 trustProxy 跳數，而放寬檢查的後果（萬用
   // 字元 origin 通過、trustProxy 接受 true）不會有任何啟動期症狀。
