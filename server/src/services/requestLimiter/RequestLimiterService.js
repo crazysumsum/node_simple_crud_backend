@@ -15,7 +15,13 @@ function requestPath(req) {
 }
 
 /**
- * 系統層請求限流：IP 滑動窗口、並行上限、以及滿載時的 FIFO 佇列。
+ * 系統層請求限流：IP token bucket、並行上限、以及滿載時的 FIFO 佇列。
+ *
+ * 三層的範圍不一樣，這個區分是設計的前提：
+ *   IP 配額    是「這個客戶能打多快」，狀態在 store（見 RateLimitStore 的註解，
+ *              框架只提供記憶體實作，所以配額是每個實例各自算的）
+ *   並行上限   是「這個行程同時能跑幾個請求」，本來就該是每個實例自己的
+ *   佇列       裡面躺的是本機的 res 物件，跨實例共享沒有意義
  *
  * 中間件是這個 service 的產出，不是它的替代品——狀態（activeRequests、queue、
  * store、idleWaiters）由 service 持有，middleware() 只是一個閉包。LoggingService
@@ -93,6 +99,26 @@ export class RequestLimiterService {
     this.shuttingDown = false;
     this.closed = false;
     this.idleWaiters = new Set();
+  }
+
+  /**
+   * 宣告限流是怎麼算的，特別是「配額是每個實例各自算」這一件。
+   *
+   * 沒有這一筆日誌的話，部署四個實例的人看到設定寫 20，會相信全域是 20/s，
+   * 實際上是 80/s——而這個誤解不會有任何徵兆。這跟 scheduler.disabled 是同一個
+   * 原則：行為與預期不同時，答案不該要翻原始碼才找得到。
+   */
+  async initialize() {
+    await this.logger.info("request.limit.started", "Request limiting is active", {
+      storeAdapter: this.config.storeAdapter,
+      // 這個字是重點。
+      quotaScope: "instance",
+      maxRequestsPerIpPerWindow: this.config.maxRequestsPerIpPerWindow,
+      ipWindowMs: this.config.ipWindowMs,
+      maxConcurrentRequests: this.config.maxConcurrentRequests,
+      maxQueueSize: this.config.maxQueueSize,
+      note: "The IP quota is a token bucket counted per instance; N instances allow N times this rate."
+    });
   }
 
   middleware() {

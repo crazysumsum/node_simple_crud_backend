@@ -80,6 +80,27 @@ function memoryLogger() {
   };
 }
 
+test("startup says out loud that the IP quota is counted per instance", async () => {
+  const logger = memoryLogger();
+  const limiter = new RequestLimiterService({
+    config: { ...baseConfig, maxRequestsPerIpPerWindow: 20 },
+    logger,
+    time: createTestTime()
+  });
+
+  await limiter.initialize();
+
+  // 框架只有記憶體 store，所以四個實例等於四倍速率。看到設定寫 20 的人會相信
+  // 全域就是 20/s，而這個誤解沒有任何徵兆——除非啟動時就講出來。
+  const started = logger.entries.find(
+    (entry) => entry.event === "request.limit.started"
+  );
+  assert.equal(started.level, "info");
+  assert.equal(started.context.quotaScope, "instance");
+  assert.equal(started.context.maxRequestsPerIpPerWindow, 20);
+  assert.match(started.context.note, /per instance/);
+});
+
 test("request limiter processes queued requests in FIFO order and rejects a full queue", async () => {
   let now = 1000;
   const logger = memoryLogger();
@@ -118,7 +139,7 @@ test("request limiter processes queued requests in FIFO order and rejects a full
   assert.ok(logger.entries.some((entry) => entry.event === "request.limit.dequeued"));
 });
 
-test("request limiter rejects an IP that exceeds the sliding window", async () => {
+test("request limiter rejects an IP whose token bucket is empty", async () => {
   let now = 0;
   const logger = memoryLogger();
   const time = createTestTime({ clock: () => new Date(now) });
@@ -213,7 +234,10 @@ test("request limiter rejects queued and new requests during graceful shutdown",
   assert.equal(await idle, true);
 });
 
-test("request limiter instances share IP quotas through an injected store", async () => {
+// 框架只提供記憶體 store，所以配額是每個實例各自算的。這個測試證明的是那道
+// 接縫本身：兩個限流器共用同一個注入的 store 時，配額就是共用的——誰要跨實例
+// 的精確配額，實作 RateLimitStore 並注入即可，不必改框架程式碼。
+test("two limiters sharing one injected store share the quota", async () => {
   let now = 5000;
   const time = createTestTime({ clock: () => new Date(now) });
   const store = new MemoryRateLimitStore({ now: () => time.nowMs() });

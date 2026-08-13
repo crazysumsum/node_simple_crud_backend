@@ -47,17 +47,17 @@ test("purge removes stale keys even though no request ever arrives", async () =>
 
   await store.consume("ip:1.1.1.1", { limit: 5, windowMs: 1000 });
   await store.consume("ip:2.2.2.2", { limit: 5, windowMs: 1000 });
-  assert.equal(store.entries.size, 2);
+  assert.equal(store.buckets.size, 2);
 
   // 流量停了。沒有 consume()，節流版 cleanup() 永遠不會被觸發。
   now += 60_000;
   const removedKeys = await store.purge({ before: now - 1000 });
 
   assert.equal(removedKeys, 2);
-  assert.equal(store.entries.size, 0);
+  assert.equal(store.buckets.size, 0);
 });
 
-test("purge keeps records that are still inside the window", async () => {
+test("purge keeps buckets that have not finished refilling", async () => {
   let now = 10_000;
   const store = new MemoryRateLimitStore({ now: () => now });
 
@@ -67,13 +67,13 @@ test("purge keeps records that are still inside the window", async () => {
 
   const removedKeys = await store.purge({ before: now - 1000 });
 
-  // 第一筆已經出窗，第二筆還在窗內——清理不能把還算數的配額一起抹掉。
+  // 兩個桶都還欠著回填。刪掉一個沒回滿的桶等於把它剩下的配額免費送出去。
   assert.equal(removedKeys, 0);
-  assert.deepEqual([...store.entries.keys()], ["ip:1.1.1.1", "ip:2.2.2.2"]);
+  assert.deepEqual([...store.buckets.keys()], ["ip:1.1.1.1", "ip:2.2.2.2"]);
 
   now += 1000;
   await store.purge({ before: now - 1000 });
-  assert.equal(store.entries.size, 0);
+  assert.equal(store.buckets.size, 0);
 });
 
 test("traffic still triggers cleanup, so no scheduler is not no cleanup", async () => {
@@ -85,7 +85,7 @@ test("traffic still triggers cleanup, so no scheduler is not no cleanup", async 
   await store.consume("ip:2.2.2.2", { limit: 5, windowMs: 1000 });
 
   // 排程器或 purge job 被停用時，清理能力只是退回「有流量才清」，不會消失。
-  assert.deepEqual([...store.entries.keys()], ["ip:2.2.2.2"]);
+  assert.deepEqual([...store.buckets.keys()], ["ip:2.2.2.2"]);
 });
 
 test("the base store treats purge as a no-op for TTL-backed adapters", async () => {
@@ -109,7 +109,7 @@ test("the limiter purges using its own window, and purge is safe without support
   now += 60_000;
 
   assert.equal(await limiter.purge(), 1);
-  assert.equal(limiter.store.entries.size, 0);
+  assert.equal(limiter.store.buckets.size, 0);
 
   // 注入的 adapter 沒有 purge() 時只是沒有東西可做，不該爆。
   limiter.store = { consume: async () => ({ allowed: true }) };
