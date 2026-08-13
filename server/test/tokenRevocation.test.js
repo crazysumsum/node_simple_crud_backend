@@ -492,7 +492,9 @@ function strategyWith({
   claims,
   isRevoked,
   snapshotAgeSeconds = 5,
-  snapshotUsable = true
+  snapshotUsable = true,
+  verify,
+  requestId = "req-1"
 }) {
   const logger = collectingLogger();
   const strategy = new JwtAuthStrategy({
@@ -503,7 +505,7 @@ function strategyWith({
           jwt: {
             headerName: "authorization",
             authScheme: "Bearer",
-            verify: () => claims
+            verify: verify ?? (() => claims)
           },
           tokenRevocation: {
             isRevoked,
@@ -515,7 +517,7 @@ function strategyWith({
     }
   });
   const req = {
-    requestId: "req-1",
+    requestId,
     get: (name) => (name === "authorization" ? "Bearer some.token.value" : undefined)
   };
 
@@ -606,6 +608,31 @@ test("a known-revoked subject still gets 401 while the circuit is open", async (
       return true;
     }
   );
+});
+
+test("a rejection logs a null request id rather than dropping the entry", async () => {
+  // requestId 由中間件掛上，但策略不能假設它一定在——內部呼叫、或中間件順序
+  // 被改動時就沒有。這則日誌是「有人在偽造 token」唯一的紀錄，少了關聯 id
+  // 還是要記下來，不能整筆消失或炸掉。
+  const { strategy, req, logger } = strategyWith({
+    claims: { sub: "42", iat: 100 },
+    isRevoked: () => false,
+    requestId: null,
+    verify: () => {
+      const error = new Error("invalid signature");
+      error.name = "JsonWebTokenError";
+      throw error;
+    }
+  });
+
+  await assert.rejects(() => strategy.authenticate(req), (error) => {
+    assert.equal(error.code, "JWT_INVALID");
+    return true;
+  });
+
+  const entry = logger.entries.find(({ event }) => event === "auth.jwt.rejected");
+  assert.equal(entry.context.requestId, null);
+  assert.equal(entry.context.error.name, "JsonWebTokenError");
 });
 
 test("a token that is not revoked passes through untouched", async () => {
