@@ -61,7 +61,8 @@ export function validateApiConfig(
   defaultRequestTimeoutMs,
   authorizationPolicies = createAuthorizationPolicyRegistry(),
   versioning = normalizeApiVersioningConfig(apiConfig.versioning),
-  idempotency
+  idempotency,
+  requestReceiveTimeoutMs = Number(applicationConfig.requestReceiveTimeoutMs)
 ) {
   if (!Array.isArray(routes)) {
     throw new TypeError("API config must export an array");
@@ -167,6 +168,16 @@ export function validateApiConfig(
       );
     }
 
+    // 會讀 body 的 route（上傳）是在 route timeout 開始計時之後才收 body 的，
+    // 兩段時間重疊。socket 層的收取上限若比這條 route 的逾時短，Node 會先把
+    // 連線切掉，這條 route 的 timeoutMs 就永遠到不了——症狀是「大檔案上傳偶爾
+    // 失敗」，不會有任何東西指回設定檔。全域檢查擋不住這種 per-route 覆寫。
+    if (timeoutMs > requestReceiveTimeoutMs) {
+      throw new Error(
+        `${routeKey} has timeoutMs ${timeoutMs}, which exceeds application.requestReceiveTimeoutMs (${requestReceiveTimeoutMs}). The socket-level receive timeout would cut the connection before this route's own timeout could fire. Raise requestReceiveTimeoutMs, or lower this route's timeout.`
+      );
+    }
+
     if (configuredRoutes.has(routeKey)) {
       throw new Error(`Duplicate API config: ${routeKey}`);
     }
@@ -189,7 +200,8 @@ export function createApiDispatcher({
   time,
   fileTypes,
   apiUpload = normalizeApiUploadConfig(apiConfig.upload),
-  defaultRequestTimeoutMs = Number(applicationConfig.requestTimeoutMs)
+  defaultRequestTimeoutMs = Number(applicationConfig.requestTimeoutMs),
+  requestReceiveTimeoutMs = Number(applicationConfig.requestReceiveTimeoutMs)
 } = {}) {
   if (
     !strategies ||
@@ -231,7 +243,8 @@ export function createApiDispatcher({
     defaultRequestTimeoutMs,
     activeAuthorizationPolicies,
     activeVersioning,
-    idempotency
+    idempotency,
+    requestReceiveTimeoutMs
   );
 
   const router = Router();
