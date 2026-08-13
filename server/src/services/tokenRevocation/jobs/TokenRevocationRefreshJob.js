@@ -46,6 +46,9 @@ export class TokenRevocationRefreshJob extends BaseService {
     // 分開是對的——一個是排程參數，一個是安全承諾——但兩者必須相容，否則有人
     // 為了省資料庫負載把間隔調到 10 分鐘時，撤銷 SLA 會從 60 秒悄悄變成 10 分鐘，
     // 沒有任何地方會說出來。
+    //
+    // 這是三段鏈的第一段：intervalMs <= maxStalenessSeconds <= maxFailOpenSeconds。
+    // 第二段由 normalizeTokenRevocationConfig 檢查。
     if (this.intervalMs > this.maxStalenessSeconds * 1000) {
       throw new Error(
         `Job "${JOB_NAME}" runs every ${this.intervalMs}ms, which exceeds ` +
@@ -59,6 +62,14 @@ export class TokenRevocationRefreshJob extends BaseService {
   }
 
   async run() {
-    await this.tokenRevocation.refresh();
+    // refresh() 自己吞掉例外（fail open 是刻意的），所以這裡必須把回傳值變回
+    // 一次失敗的工作。丟掉它的話，排程器會認為工作跑成功了，撤銷可以死好幾個
+    // 小時而 fr_scheduler_stats 上的 lastOutcome 一路都是 succeeded——那張表
+    // 就是為了看見這種事才建的。
+    if (!(await this.tokenRevocation.refresh())) {
+      throw new Error(
+        "Token revocation snapshot refresh failed; see auth.revocation.refresh_failed"
+      );
+    }
   }
 }
