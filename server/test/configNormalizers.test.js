@@ -180,32 +180,68 @@ test("security config validates the JSON body limit format", () => {
   );
 });
 
-test("trustProxy takes a hop count, and true is rejected loudly", () => {
-  const trustProxyOf = (trustProxy) =>
-    normalizeSecurityConfig({ ...VALID_SECURITY, reverseProxy: { trustProxy } })
-      .reverseProxy.trustProxy;
+const trustProxyOf = (trustProxy) =>
+  normalizeSecurityConfig({ ...VALID_SECURITY, reverseProxy: { trustProxy } })
+    .reverseProxy.trustProxy;
 
+test("trustProxy defaults to trusting nothing", () => {
   for (const value of [undefined, "false", "FALSE", "0", "", "  "]) {
     assert.equal(trustProxyOf(value), false, `${JSON.stringify(value)} 應該是關閉`);
   }
+});
 
-  assert.equal(trustProxyOf("1"), 1);
-  assert.equal(trustProxyOf(2), 2);
-
-  // Express 的 trust proxy 接受 true，意思是「相信整條 X-Forwarded-For」——
-  // 任何客戶端都能偽造出任意 req.ip。要求跳數等於要求部署者說出實際的代理層數。
+test("trustProxy still refuses true, however it is written", () => {
+  // true 的意思是「相信整條 X-Forwarded-For」——任何客戶端都能偽造出任意
+  // req.ip。要求說出跳數或網段，等於要求部署者講清楚實際的拓撲。
   assert.throws(
     () => trustProxyOf("true"),
-    /must use a proxy hop count instead of true/
+    /must use a proxy hop count or a list of trusted addresses instead of true/
   );
+  assert.throws(() => trustProxyOf("TRUE"), /instead of true/);
+});
 
-  for (const value of ["yes", "-1", "1.5"]) {
+test("trustProxy accepts a hop count for a single ingress path", () => {
+  assert.equal(trustProxyOf("1"), 1);
+  assert.equal(trustProxyOf(2), 2);
+});
+
+test("trustProxy accepts trusted addresses, which hop counts cannot express", () => {
+  // 跳數信任的是位置，網段信任的是身分。只要有任何一條入口路徑比跳數短，
+  // 那條路徑上客戶端自己送的那一段就會被算進信任範圍。
+  assert.deepEqual(trustProxyOf("10.0.0.0/8, 172.16.0.0/12"), [
+    "10.0.0.0/8",
+    "172.16.0.0/12"
+  ]);
+  assert.deepEqual(trustProxyOf("loopback"), ["loopback"]);
+  assert.deepEqual(trustProxyOf("uniquelocal, linklocal"), ["uniquelocal", "linklocal"]);
+  // 單一位址與 IPv6 都要能寫。
+  assert.deepEqual(trustProxyOf("192.168.1.1"), ["192.168.1.1"]);
+  assert.deepEqual(trustProxyOf("::1/128"), ["::1/128"]);
+  // 空白與多餘的逗號不該變成一個空的信任項。
+  assert.deepEqual(trustProxyOf(" 10.0.0.0/8 , , loopback "), ["10.0.0.0/8", "loopback"]);
+});
+
+test("trustProxy entries are parsed, not passed through", () => {
+  // 打錯的網段不會報錯，只會靜默地改變信任範圍——太窄就是誰都不信（限流失準），
+  // 太寬就是信了不該信的跳。所以驗證必須真的解析。
+  for (const value of ["notanip", "10.0.0.0/8/9", "-1", "1.5", "10.0.0.256"]) {
     assert.throws(
       () => trustProxyOf(value),
-      /"reverseProxy.trustProxy" must be a positive integer/,
+      /has an invalid entry/,
       `${value} 不該被接受`
     );
   }
+
+  for (const value of ["10.0.0.0/33", "::1/129", "10.0.0.0/x", "10.0.0.0/"]) {
+    assert.throws(
+      () => trustProxyOf(value),
+      /has an invalid CIDR prefix/,
+      `${value} 不該被接受`
+    );
+  }
+
+  // 清單裡有一個壞的就整個拒絕，不能只採用看得懂的那些。
+  assert.throws(() => trustProxyOf("10.0.0.0/8, oops"), /invalid entry: oops/);
 });
 
 test("security config validates the CORS max age", () => {

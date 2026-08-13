@@ -46,8 +46,25 @@ const securityConfig = {
   },
 
   reverseProxy: {
-    // Express trust proxy 設定。false 代表不信任代理；正整數代表可信任的代理 hop 數。
-    // 正式環境若只有一層 Nginx，可將 TRUST_PROXY 設為 1。避免直接使用 true。
+    // 誰送來的 X-Forwarded-For 可以相信。false 代表都不信。
+    //
+    // 兩種寫法，差別是「信任位置」還是「信任身分」：
+    //
+    //   跳數    TRUST_PROXY=1，代表從右邊數一跳是自己的代理。
+    //           只適用於單一入口。它數的是位置，所以只要有任何一條入口路徑
+    //           比這個數字短——CDN 加直連 LB、多區域、對特定路徑 bypass
+    //           CDN——那條路徑上客戶端自己送的那一段就會被算進信任範圍，
+    //           req.ip 從此由客戶端指定。
+    //
+    //   信任來源  TRUST_PROXY="loopback, 10.0.0.0/8"，接受 IP、CIDR，以及
+    //           loopback／linklocal／uniquelocal。走到第一個不在範圍內的
+    //           位址就停，與鏈的長度無關。**多入口請用這個。**
+    //
+    // 不接受 true：那等於相信整條 X-Forwarded-For，任何客戶端都能偽造出
+    // 任意 req.ip。
+    //
+    // 這個值設錯不會有任何徵兆。req.ip 餵三個地方——IP 限流、公開 route 的
+    // idempotency scope、日誌的 clientIp——被污染時三者一起失準。
     trustProxy: process.env.TRUST_PROXY || "false",
 
     // 是否強制 HTTPS。部署在 TLS reverse proxy 後方時設 ENFORCE_HTTPS=true，
