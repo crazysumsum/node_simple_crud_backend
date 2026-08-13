@@ -5,6 +5,7 @@ import {
   markRequestResponseEnded,
   onRequestProcessingComplete
 } from "../../framework/http/requestProcessingLifecycle.js";
+import { clientQuotaKey } from "./clientKey.js";
 import { normalizeRequestLimiterConfig } from "./normalizeRequestLimiterConfig.js";
 import { MemoryRateLimitStore, RateLimitStore } from "./RateLimitStore.js";
 
@@ -85,7 +86,16 @@ export class RequestLimiterService {
     }
 
     this.store =
-      injectedStore || new MemoryRateLimitStore({ now: () => this.time.nowMs() });
+      injectedStore ||
+      new MemoryRateLimitStore({
+        now: () => this.time.nowMs(),
+        maxTrackedKeys: this.config.maxTrackedKeys,
+        onKeysExhausted: (details) => this.reportKeysExhausted(details)
+      });
+    // 淘汰在攻擊下是每個請求一次，日誌不能跟著跑。節流成每分鐘一則，並帶上
+    // 這段期間累計淘汰了幾個——那個數字才是強度。
+    this.lastKeysExhaustedLogAt = 0;
+    this.keysExhaustedSinceLastLog = 0;
 
     if (
       !(this.store instanceof RateLimitStore) &&
@@ -117,8 +127,42 @@ export class RequestLimiterService {
       ipWindowMs: this.config.ipWindowMs,
       maxConcurrentRequests: this.config.maxConcurrentRequests,
       maxQueueSize: this.config.maxQueueSize,
+      maxTrackedKeys: this.config.maxTrackedKeys,
+      ipv6PrefixLength: this.config.ipv6PrefixLength,
       note: "The IP quota is a token bucket counted per instance; N instances allow N times this rate."
     });
+  }
+
+  /**
+   * key 空間滿了，有人的配額被無償重置。
+   *
+   * error 而不是 warn：淘汰本身是正確的處理，但它代表限流的保證在這一刻已經
+   * 不成立了。這跟「某個 IP 被擋下來」是完全不同的事件，不該混在同一個級別裡。
+   */
+  reportKeysExhausted({ trackedKeys, maxTrackedKeys, evictedKeys }) {
+    this.keysExhaustedSinceLastLog += 1;
+    const now = this.time.nowMs();
+
+    if (now - this.lastKeysExhaustedLogAt < 60000) {
+      return;
+    }
+
+    const evictedSinceLastLog = this.keysExhaustedSinceLastLog;
+    this.lastKeysExhaustedLogAt = now;
+    this.keysExhaustedSinceLastLog = 0;
+
+    this.writeSystemLog(
+      "error",
+      "request.limit.keys_exhausted",
+      "Rate limit key space is full; quotas are being reset by eviction",
+      {
+        trackedKeys,
+        maxTrackedKeys,
+        evictedKeys,
+        evictedSinceLastLog,
+        note: "A source is minting unseen keys. Check trustProxy, or raise maxTrackedKeys."
+      }
+    );
   }
 
   middleware() {
@@ -140,12 +184,15 @@ export class RequestLimiterService {
 
     const clientIp = req.ip || req.socket?.remoteAddress || "unknown";
     const requestId = req.requestId || null;
+    // IPv6 聚合到前綴再算配額：一整段 /64 通常是同一個客戶，逐個位址計算等於
+    // 讓他有 1.8×10^19 份配額，順便在 store 裡留下同樣多的桶。
+    const quotaKey = clientQuotaKey(clientIp, this.config.ipv6PrefixLength);
 
     let rateLimit;
 
     try {
       rateLimit = await this.store.consume(
-        `${this.config.storeKeyPrefix}:ip:${clientIp}`,
+        `${this.config.storeKeyPrefix}:ip:${quotaKey}`,
         {
           limit: this.config.maxRequestsPerIpPerWindow,
           windowMs: this.config.ipWindowMs

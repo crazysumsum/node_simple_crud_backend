@@ -30,6 +30,11 @@
  *    「經過毫秒 × limit / windowMs」，20/1000 的設定下每毫秒 0.02 個 token，
  *    整數運算會全部歸零。JS 不需要這樣做，因為回填是從 refilledAt 重算而不是
  *    逐次累加，浮點誤差不會累積。
+ *
+ * 5. key 的數量要有上界。限流器為每個沒見過的來源分配狀態，而「沒見過」的
+ *    判斷由對方控制——偽造來源永遠是新桶，新桶永遠是滿的，一個都擋不下來，
+ *    所以限流器本身就是這個攻擊的放大器。共享後端通常靠 TTL 與記憶體上限
+ *    政策（例如 Redis 的 maxmemory-policy）處理；記憶體實作見 MemoryRateLimitStore。
  */
 export class RateLimitStore {
   /**
@@ -57,19 +62,48 @@ export class RateLimitStore {
   async close() {}
 }
 
+/** 淘汰時隨機取樣的數量。見 evictOne()。 */
+export const EVICTION_SAMPLE_SIZE = 8;
+
 /**
  * 記憶體 token bucket。
  *
  * 一個桶就是兩個數字，所以狀態是 O(1)——先前的滑動窗口日誌是 O(limit)，每個
  * key 存一個時間戳陣列，而且每個請求都要 filter() 出一個新陣列。這裡的熱路徑
  * 不配置任何物件（既有的桶就地改兩個欄位），佔用也不再隨 limit 成長。
+ *
+ * 但 key 的**數量**是另一回事，而且它是外部可控的：
+ *
+ *   撐大記憶體的全部是「已經回滿」的桶。欠著 token 的桶才在做限流，而它的
+ *   數量有天然上界——最近 windowMs 內發過請求的來源數，預設 1 秒窗口下就算
+ *   15,000 req/s 也只有約 15,000 個。回滿的桶不帶任何資訊（刪掉再重建結果
+ *   一樣），卻因為清理被節流成 60 秒一次而堆到 90 萬個。
+ *
+ * 所以兩道防線：sweepThreshold 讓清理在 key 變多時不受節流限制（把天花板拉
+ * 低），maxTrackedKeys 是真的上界（保證有天花板）。少任何一道都不完整——前者
+ * 只是降低成長速度，後者單獨用則會讓每個請求都在淘汰。
  */
 export class MemoryRateLimitStore extends RateLimitStore {
-  constructor({ now = Date.now } = {}) {
+  constructor({ now = Date.now, maxTrackedKeys = 100000, onKeysExhausted } = {}) {
     super();
     this.now = now;
     this.buckets = new Map();
     this.lastCleanupAt = 0;
+    this.maxTrackedKeys = maxTrackedKeys;
+    this.onKeysExhausted = onKeysExhausted ?? null;
+    // 到了這個數量就不管節流直接掃。取上限的一半：夠高，正常流量碰不到；夠
+    // 低，碰到時離真正的上限還有一半的餘裕可以慢慢清。
+    this.sweepThreshold = Math.max(1, Math.floor(maxTrackedKeys / 2));
+    this.evictedKeys = 0;
+  }
+
+  /** 目前追蹤的 key 數，以及累計淘汰過幾個。供限流器的統計使用。 */
+  stats() {
+    return {
+      trackedKeys: this.buckets.size,
+      maxTrackedKeys: this.maxTrackedKeys,
+      evictedKeys: this.evictedKeys
+    };
   }
 
   async consume(key, { limit, windowMs }) {
@@ -104,6 +138,13 @@ export class MemoryRateLimitStore extends RateLimitStore {
     const next = bucket ?? { tokens: 0, refilledAt: 0 };
     next.tokens = tokens - 1;
     next.refilledAt = now;
+
+    // 只有新 key 會把 Map 撐大。cleanup() 剛跑過，所以還在上限就代表這些桶
+    // 都是真的在用的。
+    if (!this.buckets.has(key) && this.buckets.size >= this.maxTrackedKeys) {
+      this.evictOne(key);
+    }
+
     this.buckets.set(key, next);
 
     return { allowed: true, remaining: Math.floor(tokens - 1), retryAfterMs: 0 };
@@ -114,12 +155,80 @@ export class MemoryRateLimitStore extends RateLimitStore {
    * 消失，只是退回「有流量才清」。
    */
   cleanup(now, windowMs) {
-    if (now - this.lastCleanupAt < Math.max(windowMs, 60000)) {
+    // 節流是為了避免每個請求都掃一次 Map，那是對的——但它不該是唯一條件。
+    // key 數量本身就是「該掃了」的訊號，而且正是攻擊時唯一會動的那個訊號。
+    // 沒有這個例外的話，60 秒的節流就是攻擊者的 60 秒自由累積窗口。
+    if (
+      this.buckets.size < this.sweepThreshold &&
+      now - this.lastCleanupAt < Math.max(windowMs, 60000)
+    ) {
       return;
     }
 
     this.removeRefilled(now - windowMs);
     this.lastCleanupAt = now;
+  }
+
+  /**
+   * 騰出一個位置給新 key。
+   *
+   * 到上限時三種做法只有一種能用：拒絕新 key 等於讓攻擊者關掉所有新訪客的
+   * 服務（把限流器變成完整的 DoS 工具）；對新 key 放行不限流等於讓攻擊者一次
+   * 關掉限流；只剩淘汰。
+   *
+   * 淘汰「token 最多」的：token 越多代表欠得越少，淘汰它送出去的免費配額最少。
+   * 這個排序在洪水攻擊下正好是我們要的——攻擊者的桶各只用過一次（limit - 1
+   * 個 token，幾乎全滿），真正在被限流的重度使用者則是低 token，所以攻擊者
+   * 的 key 會先被淘汰，被限流的人留下。
+   *
+   * 隨機取樣而不是找全域最大值：後者是 O(n)，滿載時每個請求一次就成了 O(n²)。
+   * 取樣是 Redis 近似 LRU 的同一招——8 個樣本抓到「前 1/8 滿」的機率約 96%，
+   * 而這裡本來就不需要精確，只需要不要總是淘汰到最欠的那個。
+   */
+  evictOne(incomingKey) {
+    const iterator = this.buckets.keys();
+    const size = this.buckets.size;
+    let victimKey = null;
+    let victimTokens = -Infinity;
+
+    // Map 沒有隨機存取，所以用「從迭代器的隨機起點連續取樣」近似。Map 的迭代
+    // 順序是插入順序，連續的一段就是時間上相近的一批——攻擊流量下這正好整段
+    // 都是攻擊者的 key。
+    const start = Math.floor(Math.random() * Math.max(1, size - EVICTION_SAMPLE_SIZE));
+
+    for (let i = 0; i < start; i += 1) {
+      iterator.next();
+    }
+
+    for (let i = 0; i < EVICTION_SAMPLE_SIZE; i += 1) {
+      const { value: key, done } = iterator.next();
+
+      if (done) {
+        break;
+      }
+
+      const tokens = this.buckets.get(key).tokens;
+
+      if (tokens > victimTokens) {
+        victimTokens = tokens;
+        victimKey = key;
+      }
+    }
+
+    if (victimKey === null) {
+      return;
+    }
+
+    this.buckets.delete(victimKey);
+    this.evictedKeys += 1;
+    // 淘汰是正確的處理，但它同時意味著有人的配額被無償重置了——限流的保證
+    // 在這一刻已經不成立。呼叫端負責節流，這裡只管報告。
+    this.onKeysExhausted?.({
+      trackedKeys: this.buckets.size,
+      maxTrackedKeys: this.maxTrackedKeys,
+      evictedKeys: this.evictedKeys,
+      incomingKey
+    });
   }
 
   /**
