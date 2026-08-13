@@ -46,9 +46,14 @@ const apiConfig = {
 
       // 單一檔案大小上限（bytes）。校驗在串流階段進行，超限即中止，
       // 不會把超出的內容收進記憶體或寫入磁碟。
+      //
+      // 上限 100MB：校驗需要完整內容（OLE2 的目錄扇區與 OOXML 的
+      // [Content_Types].xml 都可能落在檔案尾端），所以每個進行中的檔案都完整
+      // 佔著記憶體。要支援更大的檔案得改成串流落盤，而那需要連比對器的介面
+      // 一起改成分塊掃描，不是調大這個數字就行。
       maxFileSizeBytes: 10485760,
 
-      // 單一請求最多接受的檔案數。
+      // 單一請求最多接受的檔案數。上限 20，理由與上面相同：它們相乘。
       maxFiles: 1,
 
       // 表單文字欄位數量上限。
@@ -58,6 +63,19 @@ const apiConfig = {
       // 而不是靜默截斷。maxFieldCount × maxFieldSizeBytes 決定了檔案以外
       // 的請求體上限，調高前請一併考慮這個乘積。
       maxFieldSizeBytes: 65536,
+
+      // 單一請求的檔案總量上限（bytes）。null 代表 maxFiles × maxFileSizeBytes。
+      //
+      // 需要它是因為單檔上限限制不住總和：maxFiles 個檔案各自都剛好貼著
+      // maxFileSizeBytes 是完全合法的請求。
+      maxTotalFileBytes: null,
+
+      // 單一請求的位元組總量上限，檔案與文字欄位都算在內。
+      // null 代表 maxTotalFileBytes + maxFieldCount × maxFieldSizeBytes。
+      //
+      // 這是唯一一個不必自己做乘法就讀得懂的數字，也是唯一能在 Content-Length
+      // 階段、還沒讀進任何位元組之前就擋下請求的一個。
+      maxRequestBytes: null,
 
       // 允許的檔案型別。框架會同時比對「客戶端宣告的 MIME、副檔名、檔案實際
       // 內容的簽章」三者，任何一項不符即拒絕——只比對前兩者等於沒有校驗。
@@ -98,6 +116,20 @@ const apiConfig = {
 
     // 每個 API response 用來顯示實際命中版本的 header 名稱。
     responseHeaderName: "API-Version"
+  },
+
+  // 全域的上傳限制。這一節不屬於任何一條 route，因為它限制的是整個程序。
+  upload: {
+    // 同時解析中的上傳數上限，跨所有 route 共用。滿載時回 503 與 Retry-After。
+    //
+    // 上傳在校驗通過之前完整累積在記憶體裡，所以這個數字乘上單一請求的
+    // maxRequestBytes 就是這個程序的上傳記憶體上界。啟動時會把乘積寫進
+    // api.upload_budget 這筆日誌。
+    //
+    // 滿載時不排隊是刻意的：排隊會讓客戶端握著連線慢慢傳，而佔住槽位正是這裡
+    // 要防的事。限流器的佇列之所以安全，是因為排隊中的請求還沒開始解析、
+    // 手上沒有任何 buffer。
+    maxConcurrentUploads: 10
   }
 };
 

@@ -47,10 +47,20 @@ function collect(stream, limitBytes, onLimit) {
  * 建立單一 route 的 multipart 上傳中間件。
  *
  * 檔案先在記憶體中累積並完成校驗，通過後才寫入磁碟——避免把未經驗證的內容
- * 落盤後再刪除，也避免部分寫入的檔案殘留。maxFileSizeBytes 因此同時是每個
- * 請求的記憶體上限，這也是它預設只有 10MB 的原因。
+ * 落盤後再刪除，也避免部分寫入的檔案殘留。校驗需要完整內容（OLE2 的目錄扇區
+ * 與 OOXML 的 [Content_Types].xml 都可能落在檔案尾端），所以這個取捨的代價
+ * 就是記憶體。
+ *
+ * 因此記憶體上限由三道限制共同決定，缺一不可：
+ *
+ *   maxRequestBytes   單一請求的位元組總量，檔案與文字欄位都算
+ *   maxTotalFileBytes 單一請求的檔案總量（每個檔案另受 maxFileSizeBytes 限制）
+ *   gate              全域同時解析數，跨 route 共用
+ *
+ * 前兩者限制一個請求，只有 gate 限制得住整個程序——而程序才是被 OOM killer
+ * 殺掉的那個單位。
  */
-export function createUploadMiddleware({ config, logger, fileTypes }) {
+export function createUploadMiddleware({ config, logger, fileTypes, gate = null }) {
   if (!fileTypes || typeof fileTypes.rejectionReason !== "function") {
     throw new TypeError("Upload middleware requires the filetypes service");
   }
@@ -64,6 +74,41 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
           "UPLOAD_CONTENT_TYPE_INVALID",
           "Request must use multipart/form-data",
           415
+        )
+      );
+      return;
+    }
+
+    // 誠實的客戶端會宣告 Content-Length，那就能在讀進任何一個位元組之前、也在
+    // 佔用一個併發槽位之前就拒絕。不誠實的客戶端由下面的逐位元組計數擋下。
+    const declaredLength = Number(req.get("content-length"));
+
+    if (Number.isFinite(declaredLength) && declaredLength > config.maxRequestBytes) {
+      next(
+        new UploadError(
+          "UPLOAD_REQUEST_TOO_LARGE",
+          `Request exceeds the ${config.maxRequestBytes} byte limit`,
+          413
+        )
+      );
+      return;
+    }
+
+    const releaseSlot = gate ? gate.acquire() : () => {};
+
+    if (!releaseSlot) {
+      void logger?.warn?.("upload.rejected", "Multipart upload rejected", {
+        requestId: req.requestId || null,
+        code: "UPLOAD_CAPACITY_EXCEEDED",
+        reason: "The upload concurrency gate is full",
+        ...gate.stats()
+      });
+      res.setHeader?.("Retry-After", "1");
+      next(
+        new UploadError(
+          "UPLOAD_CAPACITY_EXCEEDED",
+          "The server is handling too many uploads",
+          503
         )
       );
       return;
@@ -85,6 +130,7 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
         }
       });
     } catch (error) {
+      releaseSlot();
       next(
         new UploadError("UPLOAD_MALFORMED", "Malformed multipart request", 400)
       );
@@ -96,6 +142,8 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
     const accepted = [];
     let failure = null;
     let settled = false;
+    let requestBytes = 0;
+    let acceptedFileBytes = 0;
 
     // 只記錄第一個失敗原因。串流仍必須讀完——busboy 在任何一個 file stream 未被
     // 消耗時就不會發出 close，請求會一路掛到 request timeout。
@@ -108,10 +156,12 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
     // 會一路卡到 request timeout，只要開一批半途中斷的連線就能佔滿服務。
     const onRequestClose = () => {
       if (settled || req.complete) {
+        // req.complete 的情況下解析仍在進行，槽位要留到 close 事件那裡才放。
         return;
       }
 
       settled = true;
+      releaseSlot();
       req.unpipe(parser);
       parser.destroy();
       next(
@@ -124,6 +174,30 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
     };
 
     req.on("close", onRequestClose);
+
+    // 逐位元組計數，擋下沒有宣告 Content-Length 或宣告不實的客戶端。data 監聽
+    // 器與 pipe 並存不會搶走資料，兩邊都收得到同樣的 chunk。
+    //
+    // 超限就立刻切斷，不是記下來等解析結束——重點正是不要把那些位元組收進來。
+    req.on("data", (chunk) => {
+      requestBytes += chunk.length;
+
+      if (requestBytes <= config.maxRequestBytes || settled) {
+        return;
+      }
+
+      settled = true;
+      releaseSlot();
+      req.unpipe(parser);
+      parser.destroy();
+      next(
+        new UploadError(
+          "UPLOAD_REQUEST_TOO_LARGE",
+          `Request exceeds the ${config.maxRequestBytes} byte limit`,
+          413
+        )
+      );
+    });
 
     parser.on("field", (name, value, info) => {
       // busboy 對超長欄位是靜默截斷，不會發出任何事件；不主動檢查的話
@@ -195,6 +269,21 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
                   "UPLOAD_TYPE_MISMATCH",
                   `Rejected upload: ${reason}`,
                   415
+                )
+              );
+              return;
+            }
+
+            acceptedFileBytes += size;
+
+            // 每個檔案各自貼著 maxFileSizeBytes 是完全合法的，所以單檔上限
+            // 限制不住總量。maxFiles 個檔案的總和才是這個請求真正佔用的記憶體。
+            if (acceptedFileBytes > config.maxTotalFileBytes) {
+              fail(
+                new UploadError(
+                  "UPLOAD_TOTAL_TOO_LARGE",
+                  `Files exceed the ${config.maxTotalFileBytes} byte total limit`,
+                  413
                 )
               );
               return;
@@ -300,6 +389,8 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
           void logger?.info?.("upload.accepted", "Multipart upload accepted", {
             requestId: req.requestId || null,
             fileCount: stored.length,
+            requestBytes,
+            totalFileBytes: acceptedFileBytes,
             files: stored.map(({ storedName, mimeType, size }) => ({
               storedName,
               mimeType,
@@ -320,7 +411,10 @@ export function createUploadMiddleware({ config, logger, fileTypes }) {
             reason: uploadError.message
           });
           next(uploadError);
-        });
+        })
+        // 槽位必須在成功與失敗兩條路上都放掉。漏放一次是單向累積的：上傳會在
+        // 某個時點之後全部開始回 503，而且沒有任何錯誤指向原因。
+        .finally(releaseSlot);
     });
 
     req.pipe(parser);
