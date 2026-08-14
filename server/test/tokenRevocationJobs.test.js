@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { discoverServiceDefinitions } from "../src/framework/services/serviceDiscovery.js";
-import { TokenRevocationPurgeJob } from "../src/services/tokenRevocation/jobs/TokenRevocationPurgeJob.js";
 import { TokenRevocationRefreshJob } from "../src/services/tokenRevocation/jobs/TokenRevocationRefreshJob.js";
 
-// 這兩個 job 的 scope 相反，而且都不會在弄反時發出任何錯誤：
-//   refresh 弄成 cluster → 只有搶到租約的那台會更新快照，其餘實例的撤銷永遠
-//                          停在啟動時的狀態
-//   purge   弄成 instance → 每台重複掃同一張共用表，結果正確只是白費
-// 兩者都只能靠測試釘住。
+// refresh 弄成 cluster 不會發出任何錯誤：只有搶到租約的那台會更新快照，其餘
+// 實例的撤銷永遠停在啟動時的狀態，而對排程器而言工作確實跑成功了。只能靠測試
+// 釘住。
+//
+// 曾經還有一個 cluster scope 的 purge job，負責刪掉早已無意義的時間切線。版本
+// 表永久保留（一個使用者一列，不隨撤銷次數增長），所以那件工作連同它的保留期
+// 設定一起消失了。
 
 function fakeScheduler() {
   const registered = [];
@@ -53,28 +54,6 @@ function createRefreshJob({
   return { job, refreshed, scheduler };
 }
 
-function createPurgeJob() {
-  const purged = [];
-  const scheduler = fakeScheduler();
-  const job = new TokenRevocationPurgeJob({
-    config: {},
-    services: {
-      require: (name) =>
-        ({
-          tokenRevocation: {
-            async purge() {
-              purged.push("purge");
-              return 0;
-            }
-          },
-          scheduler
-        })[name]
-    }
-  });
-
-  return { job, purged, scheduler };
-}
-
 // --- scope ------------------------------------------------------------------
 
 test("the refresh job is instance scoped, so every instance updates its own snapshot", () => {
@@ -82,13 +61,6 @@ test("the refresh job is instance scoped, so every instance updates its own snap
 
   assert.equal(declared.scope, "instance");
   assert.equal(declared.name, "tokenRevocation.refresh");
-});
-
-test("the purge job is cluster scoped, so one instance cleans the shared table", () => {
-  const [declared] = TokenRevocationPurgeJob.jobs;
-
-  assert.equal(declared.scope, "cluster");
-  assert.equal(declared.name, "tokenRevocation.purge");
 });
 
 // --- 交叉檢查 ----------------------------------------------------------------
@@ -141,35 +113,24 @@ test("the deployment override wins over the static declaration", async () => {
 
 // --- 提交與執行 --------------------------------------------------------------
 
-test("both jobs submit themselves and their declarations resolve to real methods", async () => {
+test("the job submits itself and its declaration resolves to a real method", async () => {
   const refresh = createRefreshJob();
-  const purge = createPurgeJob();
 
   await refresh.job.initialize();
-  await purge.job.initialize();
 
   assert.deepEqual(refresh.scheduler.registered, [refresh.job]);
-  assert.deepEqual(purge.scheduler.registered, [purge.job]);
 
   // method 是字串形式的方法參照，沒有工具檢查得到它拼對沒有。
-  for (const [JobClass, instance] of [
-    [TokenRevocationRefreshJob, refresh.job],
-    [TokenRevocationPurgeJob, purge.job]
-  ]) {
-    const [declared] = JobClass.jobs;
-    assert.equal(typeof instance[declared.method], "function");
-  }
+  const [declared] = TokenRevocationRefreshJob.jobs;
+  assert.equal(typeof refresh.job[declared.method], "function");
 });
 
-test("running each job reaches the revocation service", async () => {
+test("running the job reaches the revocation service", async () => {
   const refresh = createRefreshJob();
-  const purge = createPurgeJob();
 
   await refresh.job.run();
-  await purge.job.run();
 
   assert.deepEqual(refresh.refreshed, ["refresh"]);
-  assert.deepEqual(purge.purged, ["purge"]);
 });
 
 test("a refresh that fails open still fails the job", async () => {
@@ -187,12 +148,11 @@ test("a refresh that fails open still fails the job", async () => {
   assert.deepEqual(refreshed, ["refresh"]);
 });
 
-test("both jobs are discovered by the ordinary service mechanism", async () => {
+test("the job is discovered by the ordinary service mechanism", async () => {
   const definitions = await discoverServiceDefinitions();
   const names = definitions.map(({ name }) => name);
 
   assert.ok(names.includes("job.tokenRevocationRefresh"));
-  assert.ok(names.includes("job.tokenRevocationPurge"));
 
   // 排程器依賴刻意隔離在葉子裡。掛在 TokenRevocationService 身上的話，停用
   // 排程器會讓撤銷 service 建構失敗，進而讓 auth.jwt 起不來——用「關掉排程器」

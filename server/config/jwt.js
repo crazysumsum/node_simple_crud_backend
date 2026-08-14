@@ -15,9 +15,7 @@ const jwtConfig = {
 
   // 登入成功後簽發的 Token 有效期。必須是整數加上單位 s、m、h、d 或 w，例如
   // 2h、30m、7d。不接受純數字：jsonwebtoken 把字串 "3600" 當成 3600 毫秒，
-  // 會簽出 3 秒壽命的 token。這個值在啟動時會與 config/tokenRevocation.js 的
-  // retentionSeconds 交叉檢查——保留期蓋不過 token 壽命的話，撤銷記錄被清掉時
-  // 已撤銷的 token 會重新有效。
+  // 會簽出 3 秒壽命的 token，而且沒有任何地方會說出來。
   expiresIn: process.env.JWT_EXPIRES_IN || "2h",
 
   // 驗證 exp、nbf 等時間欄位時容許的時鐘誤差，單位為秒。

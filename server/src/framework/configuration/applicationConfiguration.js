@@ -115,11 +115,9 @@ export function validateApplicationConfiguration(
  * 沒有上限、或讓某個設定值從此是一句空話。
  */
 function crossSectionChecks(normalized, details, { heapLimitBytes }) {
-  const { application, database, jwt, logging, requestLimiter, scheduler, tokenRevocation } =
-    normalized;
+  const { application, database, logging, requestLimiter, scheduler } = normalized;
 
   checkLogQueueBudget(logging, heapLimitBytes, details);
-  checkRevocationRetention(jwt, tokenRevocation, details);
   checkRevocationRefreshScheduled(scheduler, details);
 
   if (!application || !database) {
@@ -190,44 +188,6 @@ function crossSectionChecks(normalized, details, { heapLimitBytes }) {
         `requestLimiter.maxConcurrentRequests (${requestLimiter.maxConcurrentRequests}) ` +
         `minus "connectionLimit" (${database.connectionLimit}) = ${worstCaseWaiters}, ` +
         "or the pool starts rejecting queries at ordinary full load."
-    });
-  }
-}
-
-/**
- * 撤銷切線的保留期，蓋不蓋得過最長的 token 壽命。
- *
- * 清理工作刪的是 revoked_before < now - retentionSeconds 的列。保留期比 token
- * 壽命短的話，那一列被刪掉時仍然有活著的 token 早於它——已撤銷的 token 重新
- * 有效，而且兩邊各自都在做對的事，不會有任何錯誤浮現。實測 30d 的 token 配
- * 出廠的 7d 保留期，被撤銷的 token 會復活 23 天。
- *
- * 這條關係跨兩個設定檔（config/jwt.js 與 config/tokenRevocation.js），任一邊
- * 單獨看都合法，所以只能擋在啟動。
- */
-function checkRevocationRetention(jwt, tokenRevocation, details) {
-  if (!jwt || !tokenRevocation) {
-    return;
-  }
-
-  // iat 來自簽發節點的時鐘、切線來自資料庫時鐘，exp 的驗證還另外帶
-  // clockTolerance。邊界要把兩種誤差都算進去，否則剛好卡在邊緣的那一批仍然
-  // 會復活。
-  const requiredSeconds =
-    jwt.expiresInSeconds +
-    jwt.clockToleranceSeconds +
-    tokenRevocation.maxClockSkewSeconds;
-
-  if (tokenRevocation.retentionSeconds < requiredSeconds) {
-    details.push({
-      section: "tokenRevocation",
-      message:
-        `"retentionSeconds" (${tokenRevocation.retentionSeconds}s) must be at least ` +
-        `jwt.expiresIn (${jwt.expiresIn} = ${jwt.expiresInSeconds}s) plus ` +
-        `jwt.clockToleranceSeconds (${jwt.clockToleranceSeconds}s) plus ` +
-        `"maxClockSkewSeconds" (${tokenRevocation.maxClockSkewSeconds}s) = ` +
-        `${requiredSeconds}s, or the purge job deletes cut-lines while tokens issued ` +
-        "before them are still alive, and revoked tokens become valid again."
     });
   }
 }

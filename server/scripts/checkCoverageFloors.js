@@ -77,7 +77,7 @@ const FLOORS = {
     branches: 90,
     functions: 95
   },
-  // 撤銷壞掉的每一種形態都是安靜的：快照沒更新、切線算錯一秒、清理刪早了、
+  // 撤銷壞掉的每一種形態都是安靜的：快照沒更新、版本沒寫進 token、比較寫反了、
   // fail open 的上界比錯邊，症狀全都是「已撤銷的 token 還能用」，不會有任何
   // 錯誤浮現。
   "src/services/tokenRevocation/TokenRevocationService.js": {

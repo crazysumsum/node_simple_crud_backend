@@ -103,7 +103,9 @@ test("secret validation still runs on the unwrapped value", () => {
 
 test("the jwt service still signs and verifies through the wrapper", () => {
   const service = new JwtService({ config: { jwt: jwtSource } });
-  const claims = service.verify(service.issue({ role: "admin" }, { subject: "u-1" }));
+  const claims = service.verify(
+    service.issue({ role: "admin" }, { subject: "u-1", version: 0 })
+  );
 
   assert.equal(claims.sub, "u-1");
   assert.equal(claims.role, "admin");
