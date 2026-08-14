@@ -10,13 +10,13 @@ import {
   TokenRevocationRefreshJob
 } from "../src/services/tokenRevocation/jobs/TokenRevocationRefreshJob.js";
 
-// 撤銷的兩個前提跨了三個設定檔，而且每一邊單獨看都合法：
+// 撤銷的前提：刷新工作（config/scheduler.js）必須是開著的，否則快照永遠停在
+// 啟動時的狀態。這件事沒有執行期症狀——啟動成功，然後幾分鐘後整站 503，或者
+// 撤銷從此靜默地不生效——所以只能擋在啟動。
 //
-//   token 壽命（config/jwt.js）        <= 切線保留期（config/tokenRevocation.js）
-//   刷新工作是開著的（config/scheduler.js）
-//
-// 破壞任何一邊都沒有執行期症狀——第一個的症狀是已撤銷的 token 在幾週後重新
-// 有效，第二個是幾分鐘後整站 503 或撤銷從此不生效。兩者都只能擋在啟動。
+// 曾經還有第二條前提：切線的保留期必須蓋過 token 壽命，否則清理刪掉列時已撤銷
+// 的 token 會復活。改用版本號之後那條關係整個消失了——版本表永久保留，連清理
+// 工作都沒有。
 
 function sourceWith(overrides) {
   const source = defaultConfigurationSource();
@@ -43,56 +43,24 @@ function detailFor(source, section) {
   return null;
 }
 
-// --- 保留期 vs token 壽命 -----------------------------------------------------
-
-test("the shipped defaults satisfy both preconditions", () => {
-  // 2h 的 token 配 7 天的保留期，刷新工作預設開著。出廠設定必須自己過關，否則
-  // 這兩條檢查會在第一天就被當成噪音關掉。
+test("the shipped defaults pass their own check", () => {
+  // 出廠設定必須自己過關，否則這條檢查會在第一天就被當成噪音關掉。
   const configuration = validateApplicationConfiguration(defaultConfigurationSource());
 
-  assert.equal(configuration.jwt.expiresInSeconds, 7200);
-  assert.equal(configuration.tokenRevocation.retentionSeconds, 604_800);
+  assert.equal(configuration.scheduler.enabled, true);
+  assert.equal(configuration.jwt.expiresIn, "2h");
+  // 版本表永久保留，所以這裡沒有保留期可以配錯。
+  assert.equal(Object.hasOwn(configuration.tokenRevocation, "retentionSeconds"), false);
 });
 
-test("a token lifetime longer than the retention window fails startup", () => {
-  // 實測過的那個組合：JWT_EXPIRES_IN=30d 加出廠的 7 天保留期，啟動成功，然後
-  // 清理刪掉切線，被撤銷而尚未過期的 token 重新有效 23 天。
-  const detail = detailFor(sourceWith({ jwt: { expiresIn: "30d" } }), "tokenRevocation");
-
-  assert.match(detail.message, /"retentionSeconds" \(604800s\)/);
-  // 訊息要同時說出兩邊的值，否則看到錯誤的人還要自己去翻另一個設定檔。
-  assert.match(detail.message, /jwt\.expiresIn \(30d = 2592000s\)/);
-  assert.match(detail.message, /revoked tokens become valid again/);
-});
-
-test("the margin covers the clock tolerance and the clock skew, not just the lifetime", () => {
-  // 邊界剛好：保留期 = 壽命 + clockTolerance + maxClockSkew。
-  const exact = sourceWith({
-    jwt: { expiresIn: "1d", clockToleranceSeconds: 5 },
-    tokenRevocation: { maxClockSkewSeconds: 60, retentionSeconds: 86_400 + 65 }
-  });
-
-  assert.equal(detailFor(exact, "tokenRevocation"), null);
-
-  // 少一秒就不行。iat 與切線來自不同時鐘，卡在邊緣的那一批正是會復活的那一批。
-  const short = sourceWith({
-    jwt: { expiresIn: "1d", clockToleranceSeconds: 5 },
-    tokenRevocation: { maxClockSkewSeconds: 60, retentionSeconds: 86_400 + 64 }
-  });
-
-  assert.match(detailFor(short, "tokenRevocation").message, /= 86465s/);
-});
-
-test("expiresIn is rejected before it can be compared against anything", () => {
-  // 純數字對 jsonwebtoken 是毫秒：JWT_EXPIRES_IN=3600 會簽出 3 秒壽命的 token。
-  // 這一條擋在 jwt 那一節，所以跨檔檢查根本不會拿到一個假的秒數去比。
+test("expiresIn must be a duration anyone can read the same way", () => {
+  // 純數字對 jsonwebtoken 是毫秒：JWT_EXPIRES_IN=3600 會簽出 3 秒壽命的 token，
+  // 而 banana 會通過全部啟動驗證，等到第一次有人登入才爆。
   const detail = detailFor(sourceWith({ jwt: { expiresIn: "3600" } }), "jwt");
 
   assert.match(detail.message, /must be a whole number with a unit of s, m, h, d or w/);
   assert.match(detail.message, /milliseconds to jsonwebtoken, not seconds/);
 });
-
-// --- 刷新工作 ----------------------------------------------------------------
 
 test("the cross-check names the job the scheduler actually registers", () => {
   // 檢查用的是匯出的常數而不是自己寫一遍字串。兩邊的字面值一旦分岔，檢查會

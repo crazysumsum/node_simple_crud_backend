@@ -46,11 +46,17 @@ export class JwtService extends BaseService {
     return this.#jwt.expiresIn;
   }
 
-  issue(payload, { subject } = {}) {
-    // sub 是撤銷唯一的 key：TokenRevocationService 用它去查那個使用者的切線。
-    // 少了它，這個 token 天然免疫於所有撤銷——登出、改密碼、強制下線都對它
-    // 無效，而且沒有任何症狀。所以 subject 是必填，簽不出來遠比簽出一個永遠
-    // 撤銷不掉的 token 好。
+  /**
+   * 簽發一個 token。subject 與 version 都是必填。
+   *
+   * 這個 service 沒有依賴，也不該有——讓它依賴資料庫會把整個 auth 堆疊綁死在
+   * MySQL 上。所以 version 由呼叫端從 tokenRevocation.currentVersion() 取來再
+   * 傳進來，登入 handler 同時持有兩個 service，那一步很自然。
+   */
+  issue(payload, { subject, version } = {}) {
+    // sub 是撤銷的 key，ver 是撤銷的判準。少了任何一個，這個 token 都天然免疫
+    // 於所有撤銷——登出、改密碼、強制下線對它全部無效，而且沒有任何症狀。
+    // 兩者都是必填：簽不出來遠比簽出一個永遠撤銷不掉的 token 好。
     const sub = String(subject ?? "").trim();
 
     if (!sub) {
@@ -59,7 +65,14 @@ export class JwtService extends BaseService {
       );
     }
 
-    return jwt.sign(payload, this.#jwt.secret.reveal(), {
+    if (!Number.isInteger(version) || version < 0) {
+      throw new TypeError(
+        "JWT issue requires a version: read it from tokenRevocation.currentVersion(subject), " +
+          "or the token cannot be revoked"
+      );
+    }
+
+    return jwt.sign({ ...payload, ver: version }, this.#jwt.secret.reveal(), {
       algorithm: this.#jwt.algorithm,
       expiresIn: this.#jwt.expiresIn,
       issuer: this.#jwt.issuer,
@@ -83,9 +96,9 @@ export class JwtService extends BaseService {
     // issue() 已經強制帶 sub，所以到了這裡還缺 sub 的 token，要嘛是舊版簽的，
     // 要嘛是拿著密鑰手工造的——後者正是攻擊者會造的那一種，因為它撤銷不掉。
     //
-    // 擋在這裡而不是 isRevoked()：這是「不是一個合法 token」的結論，不是「這條
-    // 切線怎麼說」。丟 JsonWebTokenError 讓 JwtAuthStrategy 現有的 catch 原樣
-    // 接住，原因進日誌，對外仍然只有籠統的 JWT_INVALID。
+    // 擋在這裡而不是 isRevoked()：這是「不是一個合法 token」的結論，不是「這個
+    // 版本號算不算舊」。丟 JsonWebTokenError 讓 JwtAuthStrategy 現有的 catch
+    // 原樣接住，原因進日誌，對外仍然只有籠統的 JWT_INVALID。
     if (typeof claims.sub !== "string" || claims.sub.trim() === "") {
       throw new jwt.JsonWebTokenError("jwt subject is required");
     }

@@ -248,13 +248,6 @@ test("service discovery finds the built-in public services", async () => {
       dependencies: ["mysqldatabase", "logging", "time"]
     },
     {
-      // cluster scope：撤銷表是所有實例共用的，每台都掃一次只是重複同一個
-      // DELETE。清理與刷新刻意分成兩個 job，正是因為 scope 相反。
-      name: "job.tokenRevocationPurge",
-      lifecycle: "singleton",
-      dependencies: ["scheduler", "tokenRevocation"]
-    },
-    {
       // instance scope：快照在每個實例自己的記憶體裡，每一台都得自己刷新。
       name: "job.tokenRevocationRefresh",
       lifecycle: "singleton",
