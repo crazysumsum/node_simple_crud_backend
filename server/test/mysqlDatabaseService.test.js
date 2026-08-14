@@ -243,17 +243,24 @@ test("transaction queries automatically inherit the transaction timeout signal",
   assert.deepEqual(calls, ["begin", "execute", "rollback", "release"]);
 });
 
-test("transaction timeout is cleared before commit to avoid concurrent rollback", async () => {
+test("a commit slower than the deadline is cut off, and no rollback chases it", async () => {
+  // 這裡曾經是「commit 之前先解除期限」，理由是不要讓逾時在 commit 進行中觸發
+  // 一個並行的 rollback。那個顧慮是對的，解法是錯的：期限一解除，一個永不回應
+  // 的 COMMIT 就沒有任何東西中斷得了。
+  //
+  // 正確的解法是期限照樣蓋著 commit，而 rollback 由 commitAttempted 擋掉——
+  // COMMIT 一旦送出去，伺服器可能已經提交了，再送 rollback 沒有意義。
   const calls = [];
   const connection = {
     query: async () => [[], []],
     execute: async () => [{ affectedRows: 1 }],
     beginTransaction: async () => calls.push("begin"),
     commit: async () => {
-      await new Promise((resolve) => { setTimeout(resolve, 25); });
       calls.push("commit");
+      await new Promise((resolve) => { setTimeout(resolve, 200); });
     },
     rollback: async () => calls.push("rollback"),
+    destroy: () => calls.push("destroy"),
     release: () => calls.push("release")
   };
   const database = new MySqlDatabaseService({
@@ -263,6 +270,44 @@ test("transaction timeout is cleared before commit to avoid concurrent rollback"
       end: async () => {}
     },
     config: { ...config, transactionTimeoutMs: 10 },
+    logger: silentLogger,
+    context
+  });
+
+  await assert.rejects(
+    () =>
+      database.withTransaction(async (transaction) => {
+        await transaction.execute("UPDATE orders SET status = ?", ["created"]);
+        return "committed";
+      }),
+    (error) => error.code === "DATABASE_TRANSACTION_INDETERMINATE"
+  );
+
+  // destroy 而不是 release：這條連線上可能還有一個沒收掉的交易。
+  assert.deepEqual(calls, ["begin", "commit", "destroy"]);
+});
+
+test("a commit that fits inside the deadline still commits normally", async () => {
+  const calls = [];
+  const connection = {
+    query: async () => [[], []],
+    execute: async () => [{ affectedRows: 1 }],
+    beginTransaction: async () => calls.push("begin"),
+    commit: async () => {
+      await new Promise((resolve) => { setTimeout(resolve, 5); });
+      calls.push("commit");
+    },
+    rollback: async () => calls.push("rollback"),
+    destroy: () => calls.push("destroy"),
+    release: () => calls.push("release")
+  };
+  const database = new MySqlDatabaseService({
+    pool: {
+      query: async () => [[], []],
+      getConnection: async () => connection,
+      end: async () => {}
+    },
+    config: { ...config, transactionTimeoutMs: 500 },
     logger: silentLogger,
     context
   });

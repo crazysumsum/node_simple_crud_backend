@@ -52,6 +52,14 @@ async function raceWithSignal(operation, signal) {
   }
 
   if (signal.aborted) {
+    // operation 在進到這個函式之前就已經被呼叫了（引數會先求值），這裡直接拋出
+    // 就沒有人接它了。而 abort 的處理是把連線 destroy 掉，那正好會讓它 reject
+    // ——沒有這一行就是一個 unhandledRejection，整個行程被殺掉。為了修一個
+    // 卡住而做出一次崩潰。
+    //
+    // 只有這條路需要。走到下面的 Promise.race 時，race 本身就對兩邊都掛了
+    // handler，輸家後來的 rejection 一樣被吃掉。
+    void Promise.resolve(operation).catch(() => {});
     throw abortError(signal);
   }
 
@@ -66,6 +74,39 @@ async function raceWithSignal(operation, signal) {
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
+}
+
+/**
+ * 連線層壞掉的 mysql2／Node error code。這些代表「話沒送到或回應沒收到」，
+ * 與伺服器明確答覆「不行」是兩回事。
+ */
+const CONNECTION_LOST_CODES = new Set([
+  "PROTOCOL_CONNECTION_LOST",
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ECONNREFUSED"
+]);
+
+/**
+ * 這個 COMMIT 的失敗，是不是連我們自己都不知道結果。
+ *
+ * 不是每個 commit 失敗都不確定。伺服器明確拒絕的（deadlock、lock wait timeout，
+ * 帶著 ER_ 開頭的 code）是確定的——它說了「沒有」，交易一定沒有提交。只有我們
+ * 自己的 deadline 中斷、或連線斷掉，才是真的不知道：伺服器可能已經越過 commit
+ * point 只是回應丟了。
+ *
+ * 這一層分辨是必要的。少了它，每一次 commit deadlock 都會被報成「狀態未知」，
+ * 喊狼喊多了，真正需要人工對帳的那一筆就沒有人看了。
+ *
+ * signal 要單獨看，不能只看 error。期限觸發時，abort 監聽器會先把連線 destroy
+ * 掉，而 destroy 會讓還在飛的 commit 同步 reject——那個 rejection 贏了 race，
+ * 於是傳到這裡的是驅動的「Connection destroyed」，不是 abort error。只看 error
+ * 的話，一個逾時的 COMMIT 會被報成 FAILED（= 可以安全重試），正好是最危險的
+ * 那個方向。
+ */
+function isIndeterminate(error, signal) {
+  return signal?.aborted === true || CONNECTION_LOST_CODES.has(error?.code);
 }
 
 /**
@@ -403,13 +444,17 @@ export class MySqlDatabaseService extends MySqlDatabaseExecutor {
     const onParentAbort = () => controller.abort(parentSignal.reason);
     let transactionStarted = false;
     let connectionDestroyed = false;
+    // COMMIT 送出去之後，交易的結果就不再是這一側能斷定的了。這個旗標同時
+    // 擋掉「commit 失敗後再 rollback」，並決定錯誤要不要報成 indeterminate。
+    let commitAttempted = false;
     // 交易中斷一律 destroy，不看 abandonedConnectionAction。那個設定管的是
     // 單句查詢——最壞情況是連線上留著一個沒讀完的結果集，mysql2 的命令佇列
     // 會把下一個人的查詢排在後面，慢但不會錯。中斷的交易不一樣：連線上留著
     // 一個沒有 commit 也沒有 rollback 的交易，還回池子等於把它交給下一個
     // 使用者，那是正確性問題，沒有「可以接受的較慢版本」。
     const onTransactionAbort = () => {
-      if (typeof connection.destroy !== "function") {
+      // 不確定的 COMMIT 也會走進來收連線，而那時 abort 可能已經 destroy 過了。
+      if (connectionDestroyed || typeof connection.destroy !== "function") {
         return;
       }
 
@@ -461,19 +506,43 @@ export class MySqlDatabaseService extends MySqlDatabaseExecutor {
         Promise.resolve(work(transaction, { signal: controller.signal })),
         controller.signal
       );
-      clearTimeout(timer);
-      parentSignal?.removeEventListener?.("abort", onParentAbort);
-      await connection.commit();
+      // 期限一路蓋到這裡。先前 clearTimeout 排在 commit 之前，於是一個永不回應
+      // 的 COMMIT 沒有任何東西中斷得了——連 route 的 signal 都被解掉了。實測
+      // timeoutMs=10 的交易在 50ms 後仍未結束，而且 finally 跑不到，連線既沒還
+      // 也沒毀，直接從池子裡消失。
+      commitAttempted = true;
+      await raceWithSignal(connection.commit(), controller.signal);
       transactionStarted = false;
       return result;
     } catch (error) {
-      if (transactionStarted && !connectionDestroyed) {
+      // COMMIT 一旦送出去就不能再 rollback：伺服器可能已經提交了。在一條剛剛
+      // commit 失敗的連線上再送 rollback，好一點是 no-op，差一點是第二次卡死。
+      if (transactionStarted && !commitAttempted && !connectionDestroyed) {
         try {
-          await connection.rollback();
+          await raceWithSignal(connection.rollback(), controller.signal);
         } catch (rollbackError) {
           void this.logger?.error?.("database.transaction.rollback_failed", "Database rollback failed", {
             requestId: context?.requestId || null,
             error: { name: rollbackError.name, message: rollbackError.message }
+          });
+        }
+      }
+
+      if (commitAttempted) {
+        // COMMIT 失敗過的連線一律 destroy，不還回池子。這裡沒有辦法確認交易
+        // 到底收掉了沒有，而 mysql2 的 release 預設不重設 session——猜錯的話
+        // 就是把一個還開著的交易交給下一個使用者。跟中斷的交易同一個理由：
+        // 那是正確性問題，沒有「可以接受的較慢版本」。
+        onTransactionAbort();
+
+        // 錯誤 code 則要分辨。伺服器明確拒絕（ER_ 開頭）代表交易確定沒有提交，
+        // 呼叫端可以重試；只有 deadline 中斷與連線斷掉才是真的不知道。
+        if (isIndeterminate(error, controller.signal)) {
+          throw this.reportIndeterminateCommit(error, {
+            context,
+            normalizedIsolation,
+            timedOut: controller.signal.aborted,
+            activeTimeoutMs
           });
         }
       }
@@ -496,6 +565,37 @@ export class MySqlDatabaseService extends MySqlDatabaseExecutor {
         connection.release();
       }
     }
+  }
+
+  /**
+   * COMMIT 的結果不明。這是唯一一種「錯誤本身不告訴你發生了什麼」的失敗。
+   *
+   * 伺服器可能已經越過 commit point 只是回應丟了，也可能還沒到。把連線 destroy
+   * 掉也問不出答案——從客戶端看，這兩者完全一樣。
+   *
+   * 所以它必須與 DATABASE_TRANSACTION_TIMEOUT（= 確定沒有提交）分成不同的 code：
+   * 呼叫端拿到後者可以直接重試，拿到前者盲目重試就是重複執行。對外的回應仍然是
+   * 一般的 500，不確定性是講給日誌與呼叫端聽的，不是講給客戶端聽的。
+   */
+  reportIndeterminateCommit(error, { context, normalizedIsolation, timedOut, activeTimeoutMs }) {
+    void this.logger?.error?.(
+      "database.transaction.indeterminate",
+      "Transaction COMMIT did not complete; its outcome is unknown",
+      {
+        requestId: context?.requestId || null,
+        isolationLevel: normalizedIsolation,
+        // 期限到了，還是連線先斷了——處置一樣，但查起來是兩件事。
+        timedOut,
+        transactionTimeoutMs: activeTimeoutMs,
+        error: { name: error.name, message: error.message, code: error.code || null },
+        note: "The server may or may not have committed. Do not retry blindly; reconcile."
+      }
+    );
+
+    return new MySqlDatabaseOperationError(
+      "MySQL database transaction COMMIT did not complete; its outcome is unknown",
+      { code: "DATABASE_TRANSACTION_INDETERMINATE", cause: error }
+    );
   }
 
   updateContext(values) {
