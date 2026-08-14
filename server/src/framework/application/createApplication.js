@@ -272,6 +272,10 @@ class Application {
         shutdownStartedAt,
         shutdownCompletedAt: this.time.timestamp(),
         rejectedQueuedRequests,
+        // 排空只等活著的請求。被放棄的 handler 依定義永遠不會回來，等它等於
+        // 保證每次部署都燒滿 shutdownTimeoutMs 然後強制退出。這個數字是資訊，
+        // 不是失敗——但它必須出現，否則沒有人知道這個實例漏了東西。
+        abandonedRequests: this.requestLimiter?.abandonedRequests ?? 0,
         activeRequestsDrained,
         httpServerClosed,
         schedulerDrained,

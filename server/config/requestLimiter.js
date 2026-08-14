@@ -71,7 +71,26 @@ const requestLimiterConfig = {
   // /64 是單一客戶的常態分配。有些 ISP 給家庭客戶 /56 甚至 /48，那樣一個客戶
   // 仍然拿得到 256 個以上的 /64；把這個值調小會更保守，代價是同一個 ISP 的
   // 不同客戶可能被算成同一個。IPv4 不受影響。
-  ipv6PrefixLength: 64
+  ipv6PrefixLength: 64,
+
+  // 一個請求被判定為「放棄」之後，還願意等 handler 多久才把它當成洩漏。
+  //
+  // JS 的 Promise 不能取消。逾時只能發出 AbortSignal，一個沒有 race 這個
+  // signal 的 handler 會一直跑下去，而它先前會一直佔著並行槽位——實測 4 個
+  // 永不 resolve 的 handler 就讓 maxConcurrentRequests=4 的實例對所有後續請求
+  // 回 429，關機也必然逾時強制退出。現在回應一結束就把槽位還回去。
+  //
+  // 需要這段寬限是因為客戶端中途取消是家常便飯：那種請求同樣會被判定為放棄，
+  // 但 handler 幾毫秒後就正常返回，不是洩漏。沒有寬限期的話計數會不停跳動，
+  // 真正的洩漏埋在雜訊裡。必須遠小於 application.requestTimeoutMs，啟動時會檢查。
+  abandonGraceMs: 1000,
+
+  // 過了寬限期仍未返回的 handler 累積到這個數，就停止接受新請求並回 503。
+  //
+  // 一個永不返回的 handler 是 bug，達到這個數代表那個 bug 是系統性的。被負載
+  // 平衡摘出輪替，好過安靜地一路洩漏下去。每一筆都會記一則 error 級別的
+  // request.handler_leaked，帶著是哪一條 route。
+  maxAbandonedRequests: 100
 };
 
 export default requestLimiterConfig;

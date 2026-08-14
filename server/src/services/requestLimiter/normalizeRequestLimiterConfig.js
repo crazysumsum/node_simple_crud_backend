@@ -88,6 +88,14 @@ export function normalizeRequestLimiterConfig(source) {
       source.maxTrackedKeys ?? 100000,
       "maxTrackedKeys"
     ),
+    maxAbandonedRequests: positiveInteger(
+      source.maxAbandonedRequests ?? 100,
+      "maxAbandonedRequests"
+    ),
+    abandonGraceMs: positiveInteger(
+      source.abandonGraceMs ?? 1000,
+      "abandonGraceMs"
+    ),
     ipv6PrefixLength: ipv6PrefixLength(source.ipv6PrefixLength ?? 64)
   });
 }

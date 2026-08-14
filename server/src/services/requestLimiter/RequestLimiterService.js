@@ -3,6 +3,7 @@ import { sendError } from "../../framework/http/apiResponse.js";
 import {
   markRequestProcessingCompleted,
   markRequestResponseEnded,
+  onRequestAbandoned,
   onRequestProcessingComplete
 } from "../../framework/http/requestProcessingLifecycle.js";
 import { clientQuotaKey } from "./clientKey.js";
@@ -105,6 +106,10 @@ export class RequestLimiterService {
     }
 
     this.activeRequests = 0;
+    // 被放棄且已經過了寬限期的 handler。寬限期以內的不計數——客戶端中途按取消
+    // 是家常便飯，handler 幾毫秒後就正常返回，那不是洩漏。沒有寬限期的話這個
+    // 數字會不停跳動，真正的洩漏就埋在雜訊裡。
+    this.abandonedRequests = 0;
     this.queue = [];
     this.shuttingDown = false;
     this.closed = false;
@@ -182,6 +187,24 @@ export class RequestLimiterService {
       return;
     }
 
+    // 洩漏的 handler 到達上限：這個行程有真的問題，一個永不返回的 handler 是
+    // bug，N 個代表這個 bug 是系統性的。回 503 讓負載平衡把這個實例換掉——被
+    // 摘出輪替，好過安靜地一路洩漏下去。
+    if (this.abandonedRequests >= this.config.maxAbandonedRequests) {
+      this.writeSystemLog(
+        "error",
+        "request.limit.abandoned_ceiling",
+        "Refusing requests because too many handlers never settled",
+        {
+          requestId: req.requestId || null,
+          abandonedRequests: this.abandonedRequests,
+          maxAbandonedRequests: this.config.maxAbandonedRequests
+        }
+      );
+      this.rejectUnavailable(res);
+      return;
+    }
+
     const clientIp = req.ip || req.socket?.remoteAddress || "unknown";
     const requestId = req.requestId || null;
     // IPv6 聚合到前綴再算配額：一整段 /64 通常是同一個客戶，逐個位址計算等於
@@ -244,7 +267,10 @@ export class RequestLimiterService {
       requestId,
       queuedAt: null,
       timeout: null,
-      closeListener: null
+      closeListener: null,
+      abandonedAt: null,
+      graceTimer: null,
+      leaked: false
     };
 
     if (this.activeRequests < this.config.maxConcurrentRequests) {
@@ -355,19 +381,41 @@ export class RequestLimiterService {
       : this.time.nowMs() - ticket.queuedAt;
     this.clearQueuedTicket(ticket);
     this.activeRequests += 1;
-    let released = false;
+    // 三態，不是一個布林旗標。被放棄的請求已經從 activeRequests 扣掉了，之後
+    // handler 真的 settle 時要扣的是另一個桶——扣錯邊就是同一筆扣兩次，而
+    // Math.max(0, …) 會把它藏成「憑空多出來的槽位」。
+    let state = "active";
 
-    const release = () => {
-      if (released) {
+    const abandon = () => {
+      if (state !== "active") {
         return;
       }
 
-      released = true;
+      state = "abandoned";
       this.activeRequests = Math.max(0, this.activeRequests - 1);
+      this.startAbandonGrace(ticket);
+      // 槽位立刻還回去：這個請求已經結束了，繼續向活著的流量收費沒有道理。
       this.drainQueue();
       this.notifyIdle();
     };
 
+    const release = () => {
+      if (state === "done") {
+        return;
+      }
+
+      if (state === "abandoned") {
+        this.endAbandonGrace(ticket);
+      } else {
+        this.activeRequests = Math.max(0, this.activeRequests - 1);
+      }
+
+      state = "done";
+      this.drainQueue();
+      this.notifyIdle();
+    };
+
+    onRequestAbandoned(ticket.req, abandon);
     onRequestProcessingComplete(ticket.req, release);
     ticket.res.once("finish", () => markRequestResponseEnded(ticket.req));
     ticket.res.once("close", () => markRequestResponseEnded(ticket.req));
@@ -392,6 +440,64 @@ export class RequestLimiterService {
     } catch (error) {
       markRequestProcessingCompleted(ticket.req);
       throw error;
+    }
+  }
+
+  /**
+   * 開始寬限計時。期限內 handler 回來就當作沒事發生過，過了才算洩漏。
+   *
+   * 這裡不是在等 handler——槽位已經還回去了。等的只是「要不要為這一筆發警報」。
+   */
+  startAbandonGrace(ticket) {
+    ticket.abandonedAt = this.time.nowMs();
+    ticket.leaked = false;
+    ticket.graceTimer = setTimeout(() => {
+      ticket.graceTimer = null;
+      ticket.leaked = true;
+      this.abandonedRequests += 1;
+
+      // error 而不是 warn：一個永遠不返回的 handler 是 bug，而它先前唯一的
+      // 症狀是別人開始收到 429，沒有任何線索指回這條 route。
+      this.writeSystemLog(
+        "error",
+        "request.handler_leaked",
+        "Handler never settled after its request was abandoned",
+        {
+          requestId: ticket.requestId,
+          clientIp: ticket.clientIp,
+          method: ticket.req.method,
+          url: ticket.req.originalUrl || ticket.req.url,
+          api: ticket.req.apiRoute || null,
+          graceMs: this.config.abandonGraceMs,
+          abandonedRequests: this.abandonedRequests,
+          maxAbandonedRequests: this.config.maxAbandonedRequests
+        }
+      );
+    }, this.config.abandonGraceMs);
+    ticket.graceTimer.unref?.();
+  }
+
+  /** handler 終於回來了。期限內就靜靜結束，過了期限的要把計數扣回去。 */
+  endAbandonGrace(ticket) {
+    if (ticket.graceTimer) {
+      clearTimeout(ticket.graceTimer);
+      ticket.graceTimer = null;
+    }
+
+    if (ticket.leaked) {
+      ticket.leaked = false;
+      this.abandonedRequests = Math.max(0, this.abandonedRequests - 1);
+      this.writeSystemLog(
+        "info",
+        "request.handler_recovered",
+        "A leaked handler finally settled",
+        {
+          requestId: ticket.requestId,
+          api: ticket.req.apiRoute || null,
+          abandonedMs: this.time.nowMs() - ticket.abandonedAt,
+          abandonedRequests: this.abandonedRequests
+        }
+      );
     }
   }
 

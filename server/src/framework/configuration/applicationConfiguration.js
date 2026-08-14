@@ -148,6 +148,19 @@ function crossSectionChecks(normalized, details, { heapLimitBytes }) {
   const worstCaseWaiters =
     requestLimiter.maxConcurrentRequests - database.connectionLimit;
 
+  // 寬限期是「handler 已經超過期限之後，還願意等它多久才當成洩漏」。它比整個
+  // 請求的預算還長的話，每一筆被放棄的請求都要多等一個完整的請求週期才會被
+  // 計數與記錄——洩漏偵測遲到得比洩漏本身還久，等於沒有。
+  if (requestLimiter.abandonGraceMs >= application.requestTimeoutMs) {
+    details.push({
+      section: "requestLimiter",
+      message:
+        `"abandonGraceMs" (${requestLimiter.abandonGraceMs}ms) must be shorter than ` +
+        `application.requestTimeoutMs (${application.requestTimeoutMs}ms), or a leaked ` +
+        "handler is reported later than it took to give up on the request."
+    });
+  }
+
   if (database.queueLimit < worstCaseWaiters) {
     details.push({
       section: "database",

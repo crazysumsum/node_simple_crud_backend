@@ -131,7 +131,9 @@ test("application factory builds a startable and stoppable API with injected res
         ...source.database,
         acquireTimeoutMs: 40,
         queryTimeoutMs: 40
-      }
+      },
+      // 同理：洩漏 handler 的寬限期不能比整個請求的預算還長。
+      requestLimiter: { ...source.requestLimiter, abandonGraceMs: 50 }
     },
     logger,
     requestLogger: testRequestLogger(),
