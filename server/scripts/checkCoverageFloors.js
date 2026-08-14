@@ -115,6 +115,15 @@ const FLOORS = {
     branches: 95,
     functions: 95
   },
+  // 讓日誌佇列的位元組上限成立的前提，就是這裡保證每一行都不超過 maxEntryBytes。
+  // 這個保證破掉的話上限就不是上限，而症狀要等到磁碟慢下來的那一次才是 OOM。
+  // 另一種壞法更安靜：截斷把 JSON 切一半，一筆壞行毀掉整天的 JSONL，而寫入
+  // 本身完全成功。
+  "src/services/logging/renderLogEntry.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
   // 設定正規化器多數不需要下限：它們在啟動時執行，寫錯會立刻炸。這一個是
   // 例外——它守的是 CORS 白名單與 trustProxy 跳數，而放寬檢查的後果（萬用
   // 字元 origin 通過、trustProxy 接受 true）不會有任何啟動期症狀。

@@ -1,3 +1,4 @@
+import { getHeapStatistics } from "node:v8";
 import applicationConfig from "../../../config/application.js";
 import apiConfig from "../../../config/api.js";
 import databaseConfig from "../../../config/database.js";
@@ -38,9 +39,28 @@ export function defaultConfigurationSource() {
   };
 }
 
+/**
+ * 每筆排隊日誌在 maxQueuedBytes 之外的固定開銷：Buffer 物件、promise、以及
+ * 掛在序列化佇列上的 closure。實測 517B（20000 筆最小條目），取 600B 留邊。
+ * 這部分不在條目的位元組計價內，所以估算最壞情況時要另外加回去。
+ */
+const QUEUE_ENTRY_OVERHEAD_BYTES = 600;
+
+/**
+ * 日誌佇列可以佔用的 heap 比例。
+ *
+ * 佇列是純粹的額外開銷——連線池、限流器的 key 空間、正在處理的 request body
+ * 全都要用同一個 heap，而日誌堆積得最兇的時候，正是這些東西也吃緊的時候。
+ * 刻意不做成設定項：可調的安全邊界最後都會被調成 100%。
+ */
+const MAX_LOG_QUEUE_HEAP_SHARE = 0.25;
+
 export function validateApplicationConfiguration(
   source = defaultConfigurationSource(),
-  { environment = process.env.NODE_ENV || "development" } = {}
+  {
+    environment = process.env.NODE_ENV || "development",
+    heapLimitBytes = getHeapStatistics().heap_size_limit
+  } = {}
 ) {
   const details = [];
   const normalized = {};
@@ -78,7 +98,7 @@ export function validateApplicationConfiguration(
     throw new ConfigurationError(details);
   }
 
-  crossSectionChecks(normalized, details);
+  crossSectionChecks(normalized, details, { heapLimitBytes });
 
   if (details.length > 0) {
     throw new ConfigurationError(details);
@@ -93,8 +113,10 @@ export function validateApplicationConfiguration(
  * 這些關係沒有執行期症狀，所以只能擋在啟動：值排錯了不會報錯，只會讓某一段
  * 沒有上限、或讓某個設定值從此是一句空話。
  */
-function crossSectionChecks(normalized, details) {
-  const { application, database, requestLimiter } = normalized;
+function crossSectionChecks(normalized, details, { heapLimitBytes }) {
+  const { application, database, logging, requestLimiter } = normalized;
+
+  checkLogQueueBudget(logging, heapLimitBytes, details);
 
   if (!application || !database) {
     return;
@@ -136,4 +158,47 @@ function crossSectionChecks(normalized, details) {
         "or the pool starts rejecting queries at ordinary full load."
     });
   }
+}
+
+/**
+ * 所有 logger 的佇列加起來，塞不塞得進這個 heap。
+ *
+ * 每個 logger 自己的預算都合法，湊在一起卻可能超過整個程序有的記憶體，而這件
+ * 事沒有執行期症狀——一切正常，直到磁碟慢下來的那一次，然後是 OOM。實測 64MB
+ * heap 只要排到 400 筆 128KB 的日誌就死，而預設的 10000 筆上限離那裡還有 96%
+ * 的空間，丟棄邏輯一次都不會觸發。
+ */
+function checkLogQueueBudget(logging, heapLimitBytes, details) {
+  if (!logging) {
+    return;
+  }
+
+  const profiles = Object.values(logging.loggers).filter(
+    (profile) => profile.enabled
+  );
+  const worstCaseBytes = profiles.reduce(
+    (total, profile) =>
+      total +
+      profile.maxQueuedBytes +
+      profile.maxQueuedEntries * QUEUE_ENTRY_OVERHEAD_BYTES,
+    0
+  );
+  const allowanceBytes = Math.floor(heapLimitBytes * MAX_LOG_QUEUE_HEAP_SHARE);
+
+  if (worstCaseBytes > allowanceBytes) {
+    details.push({
+      section: "logging",
+      message:
+        `The log queues can hold ${megabytes(worstCaseBytes)}MB in the worst case ` +
+        `(each logger's "maxQueuedBytes" plus "maxQueuedEntries" × ` +
+        `${QUEUE_ENTRY_OVERHEAD_BYTES} bytes of per-entry overhead), which exceeds ` +
+        `${MAX_LOG_QUEUE_HEAP_SHARE * 100}% of the V8 heap limit ` +
+        `(${megabytes(allowanceBytes)}MB of ${megabytes(heapLimitBytes)}MB). Lower ` +
+        '"maxQueuedBytes" or "maxQueuedEntries", or raise --max-old-space-size.'
+    });
+  }
+}
+
+function megabytes(bytes) {
+  return Math.round(bytes / 1048576);
 }
