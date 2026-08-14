@@ -22,6 +22,27 @@ function positiveNumber(value, fieldName) {
   return number;
 }
 
+/**
+ * 最小的單筆上限。
+ *
+ * 截斷剪不動時會退回五欄骨架（timestamp、level、event、message 各留 200 字元，
+ * 加一句原始大小）。那個骨架最壞情況約 1.4KB，所以上限低於它的話，連骨架都
+ * 進不了佇列，這個 logger 從此一筆都寫不出去。
+ */
+const MIN_ENTRY_BYTES = 4096;
+
+function byteCount(value, fieldName, minimum = 1) {
+  const number = Number(value);
+
+  if (!Number.isInteger(number) || number < minimum) {
+    throw new Error(
+      `Logging config "${fieldName}" must be a whole number of bytes, at least ${minimum}`
+    );
+  }
+
+  return number;
+}
+
 const BODY_CAPTURE_MODES = Object.freeze(["none", "full"]);
 
 function bodyCaptureMode(value, fieldName) {
@@ -92,6 +113,26 @@ export function normalizeLoggerConfig(source, name = "logger") {
     );
   }
 
+  const maxEntryBytes = byteCount(
+    profile.maxEntryBytes ?? 262144,
+    `loggers.${name}.maxEntryBytes`,
+    MIN_ENTRY_BYTES
+  );
+  const maxQueuedBytes = byteCount(
+    profile.maxQueuedBytes ?? 8388608,
+    `loggers.${name}.maxQueuedBytes`
+  );
+
+  // 佇列預算裝不下一筆最大的條目，就會出現「佇列是空的但仍然收不下」這種
+  // 狀態——那不是背壓，是這個 logger 永遠寫不出東西。
+  if (maxQueuedBytes < maxEntryBytes) {
+    throw new Error(
+      `Logging config "loggers.${name}.maxQueuedBytes" (${maxQueuedBytes}) must be at ` +
+        `least "maxEntryBytes" (${maxEntryBytes}), or an empty queue still has no room ` +
+        "for a single full-size entry and every log line is dropped."
+    );
+  }
+
   return Object.freeze({
     enabled: profile.enabled !== false,
     directory,
@@ -112,6 +153,8 @@ export function normalizeLoggerConfig(source, name = "logger") {
       profile.maxQueuedEntries ?? 10000,
       `loggers.${name}.maxQueuedEntries`
     ),
+    maxQueuedBytes,
+    maxEntryBytes,
     minimumLevel,
     bodyCapture: bodyCaptureMode(
       profile.bodyCapture,
@@ -167,4 +210,4 @@ export function normalizeLoggingConfig(source) {
   return Object.freeze({ loggers: Object.freeze(loggers) });
 }
 
-export { LOG_LEVELS };
+export { LOG_LEVELS, MIN_ENTRY_BYTES };

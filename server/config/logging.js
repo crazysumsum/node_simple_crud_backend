@@ -23,10 +23,31 @@ const loggingConfig = {
       // 每個日誌檔案最大容量，單位為 bytes；超過前會建立同日流水號檔案。
       maxFileSizeBytes: 10485760,
 
-      // 等待寫入磁碟的日誌筆數上限。寫入是串行的，磁碟一慢就會堆積；
-      // 超過此上限的日誌會被丟棄，以免為了記錄故障而把記憶體吃光。
+      // 等待寫入磁碟的日誌位元組上限。寫入是串行的，磁碟一慢就會堆積；
+      // 兩個上限誰先到就丟棄誰之後的，以免為了記錄故障而把記憶體吃光。
       // 丟棄不是靜默的：下一筆成功寫入前會補上一筆 logging.entries_lost 統計。
+      //
+      // 位元組才是真正的界線。只數筆數的話，「10000 筆」對佔多少記憶體沒有
+      // 任何約束——10000 筆各帶一個 100kb 的 body（jsonBodyLimit 的預設值，
+      // 5xx 時強制記錄）實測是 1.28GB heap，而且筆數剛好卡在上限，一筆都不會
+      // 被丟棄。8MB 約等於 5000 筆典型的請求日誌，吸收爆發綽綽有餘。
+      //
+      // 兩個 logger 的 maxQueuedBytes 加上 maxQueuedEntries 的固定開銷，總和
+      // 超過 V8 heap 上限的四分之一時，應用會拒絕啟動。
+      maxQueuedBytes: 8388608,
       maxQueuedEntries: 10000,
+
+      // 單筆日誌的位元組上限。超過的不是丟棄而是截斷：從 context 往下剪掉最重
+      // 的那個節點（通常是 output.body），換成 [TRUNCATED: N bytes]，其餘欄位
+      // 原樣保留，所以 statusCode、requestId、url、durationMs 都還在。
+      //
+      // 需要這個上限是因為 context.output.body 本身沒有上界——request body 至少
+      // 被 jsonBodyLimit 擋在 100kb，但 response body 是原樣記錄的，一個匯出類
+      // 的 API 配上 bodyCapture: "full"，一筆日誌就是幾十 MB。
+      //
+      // 256KB 裝得下 100kb 的 request body 加上一般大小的 response，同時擋住
+      // MB 級的條目。不得低於 4096，否則連截斷後的骨架都放不進去。
+      maxEntryBytes: 262144,
 
       // 日誌檔與目錄的權限。預設只有擁有者可讀寫，因為日誌會保留 30 天，
       // 且在錯誤或 route 明確 opt-in 時含有完整 request／response body。
@@ -98,8 +119,13 @@ const loggingConfig = {
       // 每個 system log 檔案最大容量，單位為 bytes。
       maxFileSizeBytes: 10485760,
 
-      // 等待寫入磁碟的日誌筆數上限，超過即丟棄並在恢復後補上統計。
+      // 等待寫入磁碟的日誌上限，位元組與筆數誰先到就丟棄，並在恢復後補上統計。
+      // 語意與說明同 request logger。
+      maxQueuedBytes: 8388608,
       maxQueuedEntries: 10000,
+
+      // 單筆日誌的位元組上限，超過的部分截斷成 [TRUNCATED: N bytes]。
+      maxEntryBytes: 262144,
 
       // 日誌檔與目錄的權限。預設只有擁有者可讀寫，因為日誌會保留 30 天，
       // 且在錯誤或 route 明確 opt-in 時含有完整 request／response body。

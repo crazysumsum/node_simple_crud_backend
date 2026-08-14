@@ -1,6 +1,7 @@
 import { appendFile, chmod, mkdir, readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { reportInternalFailure } from "../../framework/diagnostics/reportInternalFailure.js";
+import { EMPTY_LINE, renderLogEntry } from "./renderLogEntry.js";
 
 // Shared JSONL file writer used by every configured Logger.
 
@@ -36,11 +37,21 @@ export class FileLogWriter {
 
     this.lastCleanupAt = 0;
     this.queue = Promise.resolve();
-    // 寫入是串行的，磁碟一慢佇列就會堆積。沒有上限的話，堆積的是完整的日誌
-    // 條目（錯誤時含整個 request／response body），會一路吃掉記憶體直到程序
-    // 被 OOM 殺掉——為了記錄故障而製造更大的故障。
+    // 寫入是串行的，磁碟一慢佇列就會堆積。堆積的是完整的日誌條目（錯誤時含
+    // 整個 request／response body），沒有上限就會一路吃掉記憶體直到程序被
+    // OOM 殺掉——為了記錄故障而製造更大的故障。
+    //
+    // 上限必須以位元組計。只數筆數的話，「10000 筆」對佔多少記憶體沒有任何
+    // 約束：實測出廠設定下，10000 筆各帶一個 100kb 的 body（jsonBodyLimit 的
+    // 預設值，5xx 時強制記錄）就是 1.28GB heap／1.75GB RSS，而丟棄邏輯一次都
+    // 沒有觸發，因為筆數剛好卡在上限。
     this.queuedEntries = 0;
+    this.queuedBytes = 0;
     this.droppedEntries = 0;
+    this.droppedForQueueBytes = 0;
+    // 累計值，不隨統計送出而歸零：截斷本身不會觸發統計那一筆日誌（每筆都截斷
+    // 的話會讓日誌量翻倍），所以它只在別的原因觸發時順帶報告目前的總數。
+    this.truncatedEntries = 0;
     this.failedEntries = 0;
     // 目前寫入中的檔案。快取路徑與大小，避免每一筆日誌都 readdir + stat 整個目錄
     // ——那個成本會隨保留天數累積的檔案數線性上升，而寫入是在請求路徑上。
@@ -112,20 +123,30 @@ export class FileLogWriter {
     const failedEntries = this.failedEntries;
 
     if (droppedEntries === 0 && failedEntries === 0) {
-      return { line: "", commit: () => {} };
+      return { line: EMPTY_LINE, commit: () => {} };
     }
 
-    const line = `${JSON.stringify({
-      timestamp,
-      level: "error",
-      event: "logging.entries_lost",
-      message: "Log entries were lost because the writer could not keep up",
-      context: {
-        droppedEntries,
-        failedEntries,
-        maxQueuedEntries: this.config.maxQueuedEntries
-      }
-    })}\n`;
+    const line = Buffer.from(
+      `${JSON.stringify({
+        timestamp,
+        level: "error",
+        event: "logging.entries_lost",
+        message: "Log entries were dropped because the writer could not keep up",
+        context: {
+          droppedEntries,
+          // 分開報，因為兩者的處置完全不同：位元組滿了是預算太小或條目太肥，
+          // 筆數滿了是磁碟跟不上。只有一個總數的話兩者分不出來。
+          droppedForQueueBytes: this.droppedForQueueBytes,
+          truncatedEntries: this.truncatedEntries,
+          failedEntries,
+          queuedBytes: this.queuedBytes,
+          maxQueuedEntries: this.config.maxQueuedEntries,
+          maxQueuedBytes: this.config.maxQueuedBytes,
+          maxEntryBytes: this.config.maxEntryBytes
+        }
+      })}\n`,
+      "utf8"
+    );
 
     return {
       line,
@@ -137,38 +158,69 @@ export class FileLogWriter {
     };
   }
 
+  /**
+   * 在入列之前就定型：序列化、必要時截斷、算出精確的位元組數與目標檔案日期。
+   *
+   * 之所以不留到寫入時才做，是因為位元組預算需要的就是這個數字——要先知道
+   * 這筆有多大，才決定得了收不收。
+   */
+  renderEntry(entry) {
+    const timestamp = entry?.timestamp;
+
+    if (!timestamp) {
+      throw new Error("Log entry must contain a valid timestamp");
+    }
+
+    const { line, truncated } = renderLogEntry(entry, this.config.maxEntryBytes);
+
+    if (truncated) {
+      this.truncatedEntries += 1;
+    }
+
+    return { line, timestamp, date: this.time.fileDate(timestamp) };
+  }
+
   write(entry) {
-    if (this.queuedEntries >= this.config.maxQueuedEntries) {
+    let rendered;
+
+    try {
+      rendered = this.renderEntry(entry);
+    } catch (error) {
+      this.failedEntries += 1;
+      return Promise.reject(error);
+    }
+
+    const { line, timestamp, date } = rendered;
+    const countIsFull = this.queuedEntries >= this.config.maxQueuedEntries;
+
+    if (countIsFull || this.queuedBytes + line.length > this.config.maxQueuedBytes) {
       this.droppedEntries += 1;
+
+      if (!countIsFull) {
+        this.droppedForQueueBytes += 1;
+      }
+
       return Promise.resolve();
     }
 
     this.queuedEntries += 1;
+    this.queuedBytes += line.length;
     const task = this.queue.then(async () => {
       try {
         await this.ready;
         await this.cleanupIfDue();
 
-        const entryTimestamp = entry.timestamp;
-
-        if (!entryTimestamp) {
-          throw new Error("Log entry must contain a valid timestamp");
-        }
-
-        const date = this.time.fileDate(entryTimestamp);
-        const notice = this.lostEntriesNotice(entryTimestamp);
-        const content = `${notice.line}${JSON.stringify(entry)}\n`;
-        const contentSize = Buffer.byteLength(content, "utf8");
-        const filePath = await this.filePathForWrite(date, contentSize);
+        const notice = this.lostEntriesNotice(timestamp);
+        const content =
+          notice.line.length === 0 ? line : Buffer.concat([notice.line, line]);
+        const filePath = await this.filePathForWrite(date, content.length);
 
         // mode 只在這一次呼叫實際建立檔案時生效；既有檔案由 restrictExistingFiles 處理。
-        await appendFile(filePath, content, {
-          encoding: "utf8",
-          mode: this.config.fileMode
-        });
+        await appendFile(filePath, content, { mode: this.config.fileMode });
         notice.commit();
       } finally {
         this.queuedEntries -= 1;
+        this.queuedBytes -= line.length;
       }
     });
 
