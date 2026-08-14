@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
@@ -128,6 +131,37 @@ class EchoHandler extends BaseRequestHandler {
   }
 }
 
+/**
+ * 上傳 route。timeoutMs 刻意訂得短，這樣「停滯的 multipart 由 route timeout
+ * 收掉」不必等預設的 30 秒。
+ */
+function makeUploadHandler(directory) {
+  return class UploadHandler extends BaseRequestHandler {
+    static handlerName = "upload";
+    static api = {
+      method: "POST",
+      path: "/api/v1/upload",
+      description: "Accepts a file.",
+      authType: "public",
+      authorizationPolicies: [{ name: "allowAll", options: {} }],
+      timeoutMs: 2000,
+      upload: {
+        enabled: true,
+        directory,
+        maxFileSizeBytes: 4096,
+        maxFiles: 1,
+        allowedMimeTypes: ["image/png"]
+      },
+      requestSchema: { body: { type: "object", additionalProperties: true } },
+      responseSchema: { 201: { type: "object", additionalProperties: true } }
+    };
+
+    async execute(req) {
+      return this.response({ fileCount: req.files.length }, { statusCode: 201 });
+    }
+  };
+}
+
 test("a route timeout longer than the receive timeout fails startup", () => {
   // 全域檢查看不到 per-route 覆寫，所以這一道必須在 route 註冊時再做一次。
   const route = {
@@ -251,6 +285,9 @@ test("a timer that fires after the response ended stays quiet", async () => {
 
 async function startApplication(t, overrides = {}) {
   const source = defaultConfigurationSource();
+  const uploadDirectory = await mkdtemp(path.join(tmpdir(), "slow-request-"));
+  t.after(() => rm(uploadDirectory, { recursive: true, force: true }));
+  const UploadHandler = makeUploadHandler(uploadDirectory);
   const application = await createApplication({
     configurationSource: {
       ...source,
@@ -271,7 +308,7 @@ async function startApplication(t, overrides = {}) {
     },
     handlerRegistryOptions: {
       moduleUrls: ["virtual:slowRequestTimeouts"],
-      moduleLoader: async () => ({ EchoHandler })
+      moduleLoader: async () => ({ EchoHandler, UploadHandler })
     },
     logger: {
       debug: async () => {}, info: async () => {}, warn: async () => {},
@@ -373,6 +410,116 @@ test("the server carries the configured socket timeouts", async (t) => {
   assert.equal(application.server.requestTimeout, 90000);
   assert.equal(application.server.headersTimeout, 8000);
   assert.equal(application.server.connectionsCheckingInterval, 1500);
+});
+
+// --- multipart ----------------------------------------------------------------
+
+const UPLOAD_BOUNDARY = "----slowuploadtest";
+const PNG = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.alloc(56, 0x41)
+]);
+
+function multipartBody() {
+  return Buffer.concat([
+    Buffer.from(
+      `--${UPLOAD_BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="a.png"\r\n` +
+        "Content-Type: image/png\r\n\r\n"
+    ),
+    PNG,
+    Buffer.from(`\r\n--${UPLOAD_BOUNDARY}--\r\n`)
+  ]);
+}
+
+function openUpload(port, contentLength) {
+  const socket = net.connect(port, "127.0.0.1");
+  let received = "";
+  socket.on("error", () => {});
+  socket.on("data", (chunk) => {
+    received += chunk.toString();
+  });
+  const connected = new Promise((resolve) => {
+    socket.once("connect", () => {
+      socket.write(
+        "POST /api/v1/upload HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+          `Content-Type: multipart/form-data; boundary=${UPLOAD_BOUNDARY}\r\n` +
+          `Content-Length: ${contentLength}\r\n\r\n`
+      );
+      resolve();
+    });
+  });
+  return { socket, connected, response: () => received };
+}
+
+test("a slow but legitimate upload is not cut off by the watchdog", async (t) => {
+  // 這是這個看門狗最容易誤傷的東西：一個完全合法、只是慢的上傳。計時器掛在
+  // express.json() 之前，而 multipart 瞬間走完那一段——沒有 bodyParsingComplete
+  // 解除它的話，計時器會在背景倒數，然後把上傳到一半的請求切掉。
+  //
+  // 誤傷的規模是設定值的兩個數量級：看門狗的秒數是照 jsonBodyLimit（預設
+  // 100kb）訂的，套到 maxFileSizeBytes（預設 10MB）上就變成 1 MB/s 的下限。
+  const { port } = await startApplication(t, {
+    application: { bodyReceiveTimeoutMs: 500 }
+  });
+  const body = multipartBody();
+  const { socket, connected, response } = openUpload(port, body.length);
+  t.after(() => socket.destroy());
+  await connected;
+
+  // 每 100ms 送 16 bytes，總時長遠超過 bodyReceiveTimeoutMs。
+  for (let offset = 0; offset < body.length; offset += 16) {
+    assert.equal(socket.destroyed, false, `socket was cut off at byte ${offset}`);
+    socket.write(body.subarray(offset, offset + 16));
+    await wait(100);
+  }
+
+  await wait(300);
+  assert.match(response(), /^HTTP\/1\.1 201/);
+  assert.doesNotMatch(response(), /REQUEST_BODY_TIMEOUT/);
+});
+
+test("a stalled upload is still bounded, by the route timeout", async (t) => {
+  // 上一個測試把看門狗從 multipart 上拿掉了，所以這一個必須證明那一段仍然有
+  // 上限——否則就是把 #38 修掉的槽位耗盡漏洞放回來。route 的 timeoutMs 掛在
+  // uploadMiddleware 之前，涵蓋整個 body 收取；逾時 abort 後槽位會還回來。
+  const { application, port } = await startApplication(t, {
+    // 遠大於 route 的 timeoutMs（2000）：確保收掉停滯連線的是 route timeout。
+    application: { bodyReceiveTimeoutMs: 60000 }
+  });
+  const limiter = application.requestLimiter;
+  const stalled = [
+    openUpload(port, 100000),
+    openUpload(port, 100000)
+  ];
+  t.after(() => stalled.forEach(({ socket }) => socket.destroy()));
+
+  await Promise.all(stalled.map(({ connected }) => connected));
+  for (const { socket } of stalled) {
+    socket.write(`--${UPLOAD_BOUNDARY}\r\n`);
+  }
+
+  await wait(400);
+  assert.equal(limiter.activeRequests, 2);
+
+  await wait(2200);
+
+  // route 的 timeoutMs 到期，兩個槽位都回來了。
+  assert.equal(limiter.activeRequests, 0);
+
+  const body = multipartBody();
+  const { socket, connected, response } = openUpload(port, body.length);
+  t.after(() => socket.destroy());
+  await connected;
+  socket.write(body);
+  await wait(300);
+  assert.match(response(), /^HTTP\/1\.1 201/);
+
+  // 停滯的連線要在這裡就斷掉，不能只靠 t.after：那些 after 依註冊順序執行，
+  // 而 shutdown 是 startApplication 先註冊的。逾時只送了 504，socket 仍然開著
+  // （body 還沒收完，所以也不是 idle），關閉會等到逾時然後強制結束。
+  stalled.forEach(({ socket: stalledSocket }) => stalledSocket.destroy());
+  socket.destroy();
+  await wait(50);
 });
 
 test("a normal request is untouched by the watchdog", async (t) => {

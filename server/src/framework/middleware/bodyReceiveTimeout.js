@@ -1,5 +1,7 @@
 import { sendError } from "../http/apiResponse.js";
 
+const DISARM = Symbol("bodyReceiveTimeoutDisarm");
+
 /**
  * 限制「請求已佔住限流槽位、但 body 還沒收完」那一段的時間。
  *
@@ -15,8 +17,7 @@ import { sendError } from "../http/apiResponse.js";
  *
  * 為什麼不需要知道 route：這個中間件掛在 express.json() 之前，那時 req.apiRoute
  * 還不存在。但它也不需要——它守的是「取得槽位」到「dispatcher 接手」之間那一段，
- * 而不經過 express.json() 的請求（multipart 上傳）會瞬間走完這一段，計時器在
- * 到期前就被清掉了。上傳的 body 由 route timeout 負責。
+ * 而解除的時機由 bodyParsingComplete 決定，不必事先知道是哪條 route。
  *
  * 逾時的處理是回 408 之後 destroy socket，不是只送回應：body 還在來，連線不斷
  * 掉的話對方可以繼續送，槽位也不會立刻還回來。
@@ -105,7 +106,30 @@ export function createBodyReceiveTimeoutMiddleware({
     req.once("end", cleanup);
     res.once("finish", cleanup);
     res.once("close", cleanup);
+    // 解析階段結束時由 bodyParsingComplete 取用。next() 同步返回本身不解除
+    // 任何東西——multipart 瞬間走完 express.json()，但 req 的 end 要等整個
+    // body 到齊，計時器全程掛著。
+    req[DISARM] = cleanup;
 
     next();
   };
+}
+
+/**
+ * 解除看門狗。掛在 express.json() 之後：走到這一行代表解析階段沒有卡住這個
+ * 請求——body 要嘛已經收完，要嘛框架根本不解析它（multipart 上傳）。後者的
+ * body 仍在傳，但那一段由 route 的 timeoutMs 負責：它掛在 uploadMiddleware
+ * 之前，涵蓋整個收取過程，逾時後 abort 也會把槽位還回來。
+ *
+ * 少了這一步，看門狗會把為 jsonBodyLimit 訂的速率下限套到上傳身上。以預設值
+ * 計算，100kb/10s（約 10 KB/s）變成 10MB/10s（約 1 MB/s）——差兩個數量級，
+ * 一般行動網路的上行根本達不到，而 408 REQUEST_BODY_TIMEOUT 指不回設定檔。
+ *
+ * 為什麼不在看門狗裡比對 content-type：那等於複製一份 express.json() 的型別
+ * 比對規則（body-parser 的 type-is 語義，含 +json suffix），兩邊會各自漂移。
+ * 「有沒有走到這一行」是同一件事的直接觀測。
+ */
+export function bodyParsingComplete(req, _res, next) {
+  req[DISARM]?.();
+  next();
 }

@@ -17,7 +17,10 @@ import {
   createApiDispatcher,
   validateApiConfig
 } from "../middleware/apiDispatcher.js";
-import { createBodyReceiveTimeoutMiddleware } from "../middleware/bodyReceiveTimeout.js";
+import {
+  bodyParsingComplete,
+  createBodyReceiveTimeoutMiddleware
+} from "../middleware/bodyReceiveTimeout.js";
 import { createErrorHandler } from "../middleware/errorHandler.js";
 import { sendError } from "../http/apiResponse.js";
 import {
@@ -531,6 +534,9 @@ export async function createApplication({
       })
     );
     app.use(express.json({ limit: security.jsonBodyLimit }));
+    // 解析階段結束，看門狗的任務完成。走到這裡 body 還在傳的只可能是 multipart，
+    // 由 route 的 timeoutMs 接手——那個逾時是照著上傳大小訂的。
+    app.use(bodyParsingComplete);
     app.use(apiDispatcher);
     // apiDispatcher 已處理 /api 下的所有請求，走到這裡的都是框架不認識的路徑。
     // 若交給 Express 內建的 404，客戶端會收到 HTML，破壞統一 JSON 信封的契約。
@@ -570,7 +576,9 @@ export async function createApplication({
           "httpsEnforcement",
           ...(activeRequestLimiter ? ["requestLimiter"] : []),
           "requestServiceScope",
+          "bodyReceiveTimeout",
           "jsonParser",
+          "bodyParsingComplete",
           "apiDispatcher",
           "notFound",
           "errorHandler"
