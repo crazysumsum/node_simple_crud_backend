@@ -139,6 +139,23 @@ function crossSectionChecks(normalized, details, { heapLimitBytes }) {
     });
   }
 
+  // 同一條規則的交易版本。交易走的是自己的 transactionTimeoutMs，不受
+  // queryTimeoutMs 約束，所以上面那一條完全蓋不到它——出廠設定曾經是
+  // 5000 + 30000 > 30000，交易的期限比 route 的還晚到五秒。
+  const transactionBudgetMs =
+    database.acquireTimeoutMs + database.transactionTimeoutMs;
+
+  if (transactionBudgetMs >= application.requestTimeoutMs) {
+    details.push({
+      section: "database",
+      message:
+        `"acquireTimeoutMs" (${database.acquireTimeoutMs}ms) plus "transactionTimeoutMs" ` +
+        `(${database.transactionTimeoutMs}ms) must be shorter than application.requestTimeoutMs ` +
+        `(${application.requestTimeoutMs}ms), or the route answers 504 while the transaction ` +
+        "is still holding its connection."
+    });
+  }
+
   if (!requestLimiter) {
     return;
   }

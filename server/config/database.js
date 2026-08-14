@@ -81,9 +81,21 @@ const databaseConfig = {
   abandonedConnectionAction:
     process.env.DB_ABANDONED_CONNECTION_ACTION || "destroy",
 
-  // transaction callback 的最長執行時間，單位為毫秒。callback 應監察傳入的
-  // signal 並停止後續工作，超時時框架會 rollback transaction。
-  transactionTimeoutMs: Number(process.env.DB_TRANSACTION_TIMEOUT_MS || 30000)
+  // 整個 transaction 的最長時間，單位為毫秒——涵蓋 BEGIN、callback、以及
+  // COMMIT／ROLLBACK。callback 應監察傳入的 signal 並停止後續工作。
+  //
+  // 期限一定要蓋到 COMMIT。先前它在 commit 之前就被解除，於是一個永不回應的
+  // COMMIT 沒有任何東西中斷得了——連線既不會還也不會毀，直接從池子裡消失，
+  // 累積到 connectionLimit 條整個池子就死了。
+  //
+  // 超時之後連線一律 destroy。要注意 COMMIT 超時與其他階段超時的意義不同：
+  // 其他階段確定沒有提交，可以重試；COMMIT 超時的結果是未知的（伺服器可能
+  // 已經越過 commit point 只是回應丟了），會回報成
+  // DATABASE_TRANSACTION_INDETERMINATE，不可以盲目重試。
+  //
+  // acquireTimeoutMs 加上這個值必須小於 application.requestTimeoutMs，否則
+  // route 先回 504，交易還在跑。啟動時會檢查。
+  transactionTimeoutMs: Number(process.env.DB_TRANSACTION_TIMEOUT_MS || 20000)
 };
 
 export default databaseConfig;
