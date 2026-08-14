@@ -173,4 +173,4 @@ export function renderLogEntry(entry, maxEntryBytes) {
   };
 }
 
-export { EMPTY_LINE, SKELETON_TEXT_LIMIT };
+export { EMPTY_LINE };
