@@ -1,5 +1,9 @@
 import { ApplicationError } from "../errors/ApplicationError.js";
 import { sendError } from "../http/apiResponse.js";
+import {
+  maybeMarkRequestAbandoned,
+  onRequestProcessingComplete
+} from "../http/requestProcessingLifecycle.js";
 
 export class RequestTimeoutError extends ApplicationError {
   constructor(timeoutMs) {
@@ -51,18 +55,34 @@ export function createRequestTimeoutMiddleware({
     };
     context.update(contextValues);
 
-    const cleanup = () => {
-      clearTimeout(timer);
+    const removeListeners = () => {
       res.removeListener("finish", onFinish);
       res.removeListener("close", onClose);
     };
-    const onFinish = () => cleanup();
+    const cleanup = () => {
+      clearTimeout(timer);
+      removeListeners();
+    };
+    // 兩個事件的先後順序不固定：逾時是 abort 先、回應後結束；客戶端斷線是 close
+    // 先、abort 在 onClose 裡面。所以兩邊都重跑一次完整的判定式，順序就不重要了。
+    // 借用既有的監聽器而不是另外掛兩個——res 上的監聽器已經有八個了。
+    const checkAbandoned = () =>
+      maybeMarkRequestAbandoned(req, res, controller.signal);
+    // 回應結束不代表期限失效：handler 可能送完回應才卡住。計時器要留到 handler
+    // 真的 settle 才清（下面的 onRequestProcessingComplete），否則那種 handler
+    // 沒有任何東西會發現——finish 那一刻 signal 還沒 aborted。
+    const onFinish = () => {
+      removeListeners();
+      checkAbandoned();
+    };
     const onClose = () => {
-      cleanup();
+      removeListeners();
 
       if (!controller.signal.aborted && !res.writableFinished) {
         controller.abort(new Error("Client disconnected"));
       }
+
+      checkAbandoned();
     };
 
     res.once("finish", onFinish);
@@ -71,7 +91,10 @@ export function createRequestTimeoutMiddleware({
     // cleanup 與 finish/close 監聽器都只會在這一行之後才執行，可安全宣告為 const。
     const timer = setTimeout(() => {
       if (res.writableEnded || res.destroyed) {
-        cleanup();
+        removeListeners();
+        // 回應早就結束了，但 handler 還沒回來——期限仍然到了，這一筆就是被放棄的。
+        controller.abort(new RequestTimeoutError(normalizedTimeoutMs));
+        checkAbandoned();
         return;
       }
 
@@ -121,6 +144,9 @@ export function createRequestTimeoutMiddleware({
       }
     }, normalizedTimeoutMs);
     timer.unref?.();
+    // handler settle 了，期限才真正失效。這也是計時器唯一被清掉的地方——少了它，
+    // 每一筆正常完成的請求都會把 req／res 一路吊到 timeoutMs 之後。
+    onRequestProcessingComplete(req, cleanup);
 
     next();
   };

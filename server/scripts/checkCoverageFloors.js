@@ -115,6 +115,15 @@ const FLOORS = {
     branches: 95,
     functions: 95
   },
+  // 「這個請求還算不算在飛」由這裡定義，而限流槽位與 request scope 都掛在它的
+  // 答案上。判定太鬆是對每一筆請求提早釋放槽位（並行上限系統性失準），太緊是
+  // 一個永不返回的 handler 永久佔住槽位——實測四個就讓整個實例對後續請求回
+  // 429，關機必然強制退出。兩個方向都沒有徵兆。
+  "src/framework/http/requestProcessingLifecycle.js": {
+    lines: 95,
+    branches: 95,
+    functions: 95
+  },
   // 讓日誌佇列的位元組上限成立的前提，就是這裡保證每一行都不超過 maxEntryBytes。
   // 這個保證破掉的話上限就不是上限，而症狀要等到磁碟慢下來的那一次才是 OOM。
   // 另一種壞法更安靜：截斷把 JSON 切一半，一筆壞行毀掉整天的 JSONL，而寫入
