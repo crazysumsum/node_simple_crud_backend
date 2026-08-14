@@ -20,6 +20,20 @@ function nonNegativeInteger(value, key) {
   return number;
 }
 
+function ipv6PrefixLength(value) {
+  const bits = Number(value);
+
+  // 上限 128 是完整位址（等於不聚合）；下限 1 擋掉 0，因為 /0 會把整個 IPv6
+  // 網際網路算成一個客戶端，也就是一個人就能用光所有人的配額。
+  if (!Number.isInteger(bits) || bits < 1 || bits > 128) {
+    throw new Error(
+      'Request limiter config "ipv6PrefixLength" must be an integer between 1 and 128'
+    );
+  }
+
+  return bits;
+}
+
 export function normalizeRequestLimiterConfig(source) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new TypeError("request limiter config must be an object");
@@ -69,6 +83,11 @@ export function normalizeRequestLimiterConfig(source) {
     retryAfterSeconds: positiveInteger(
       source.retryAfterSeconds ?? 1,
       "retryAfterSeconds"
-    )
+    ),
+    maxTrackedKeys: positiveInteger(
+      source.maxTrackedKeys ?? 100000,
+      "maxTrackedKeys"
+    ),
+    ipv6PrefixLength: ipv6PrefixLength(source.ipv6PrefixLength ?? 64)
   });
 }

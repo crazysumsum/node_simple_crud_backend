@@ -63,6 +63,13 @@ const FLOORS = {
     branches: 95,
     functions: 95
   },
+  // 來源 key 的收斂。太鬆是無限 key 空間（限流器變成攻擊放大器），太緊是把
+  // 不同客戶算成同一個（一個人用光所有人的配額）。兩個方向都沒有徵兆。
+  "src/services/requestLimiter/clientKey.js": {
+    lines: 95,
+    branches: 90,
+    functions: 95
+  },
   // 共享 idempotency 的失效是安靜的：互斥一旦破掉，症狀只是「偶爾重複執行」，
   // 而那在單機開發時永遠不會出現。
   "src/services/idempotency/MySqlIdempotencyStore.js": {
