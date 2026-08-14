@@ -57,13 +57,18 @@ export class TokenRevocationService extends BaseService {
    * token 是否已被撤銷。這是熱路徑，每個帶 JWT 的請求都會走一次。
    */
   isRevoked(claims) {
-    const subject = claims?.sub;
+    const subject = String(claims?.sub ?? "").trim();
 
-    if (subject === undefined || subject === null) {
-      return false;
+    // sub 缺失就沒有 key 可查，唯一 fail closed 的答案是「當作已撤銷」。與下面
+    // iat 缺失同一條規則：無從判斷就不放行。放行的話那個 token 對所有撤銷免疫。
+    //
+    // JwtService.verify() 已經先擋掉這種 token，所以正常路徑走不到這裡；這一行
+    // 是留給未來其他呼叫端的，那時它們不必再自己想一次這個問題。
+    if (!subject) {
+      return true;
     }
 
-    const revokedBefore = this.snapshot.get(String(subject));
+    const revokedBefore = this.snapshot.get(subject);
 
     if (revokedBefore === undefined) {
       return false;
@@ -227,16 +232,55 @@ export class TokenRevocationService extends BaseService {
     return removedSubjects;
   }
 
+  /**
+   * 本機時鐘與資料庫時鐘差多少。
+   *
+   * 切線取自資料庫時鐘，token 的 iat 取自簽發那台機器的時鐘。兩者不同步時，
+   * 時鐘偏快的節點簽出來的 token 帶著未來的 iat，逃過 iat < revokedBefore 的
+   * 比較——撤銷靜默失守，沒有任何錯誤，日誌上什麼都看不到。
+   *
+   * 這裡刻意只量測與記錄，不去補償：往切線或往比較加容忍值會過度撤銷，讓
+   * 「改密碼後立刻重新登入」拿到一個一簽出來就無效的 token。真正的修法是讓
+   * iat 也取自資料庫時鐘，或改用不看時鐘的版本號；在那之前，至少要讓偏差在
+   * 它造成失守之前先變成一則 error。
+   *
+   * 量到的偏差同時是 retentionSeconds 那條啟動檢查所假設的邊界——這則日誌就是
+   * 在持續驗證那個假設還成不成立。
+   */
+  async #reportClockSkew(dbNowSeconds) {
+    const skewSeconds = Math.round(this.time.nowMs() / 1000) - dbNowSeconds;
+
+    if (Math.abs(skewSeconds) <= this.revocationConfig.maxClockSkewSeconds) {
+      return;
+    }
+
+    await this.logger.error(
+      "auth.revocation.clock_skew",
+      "This node's clock disagrees with the database clock; revocation cut-lines may be bypassed",
+      {
+        skewSeconds,
+        maxClockSkewSeconds: this.revocationConfig.maxClockSkewSeconds
+      }
+    );
+  }
+
   async load() {
+    let clockRows;
     let rows;
 
     try {
+      // 兩次查詢而不是一次 JOIN：時鐘與名單是兩件無關的事，湊在一句 SQL 裡只會
+      // 讓「表不見了」與「時鐘讀不到」在錯誤訊息上分不開。刷新間隔是 30 秒，
+      // 多一次 SELECT UNIX_TIMESTAMP() 的成本可以忽略。
+      [clockRows] = await this.database.query("SELECT UNIX_TIMESTAMP() AS db_now");
       [rows] = await this.database.query(
         `SELECT subject, revoked_before FROM ${TABLE}`
       );
     } catch (error) {
       throw describeMissingTable(error, { table: TABLE, sqlFile: SQL_FILE });
     }
+
+    await this.#reportClockSkew(Number(clockRows[0].db_now));
 
     const snapshot = new Map();
 

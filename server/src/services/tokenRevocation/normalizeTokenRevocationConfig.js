@@ -8,6 +8,20 @@ function positiveInteger(value, key) {
   return number;
 }
 
+// 0 是合法的：時鐘保證同步（單機、或 iat 也取自資料庫）時，不必為不存在的偏差
+// 付出保留期的邊界。所以它不能用 positiveInteger。
+function nonNegativeInteger(value, key) {
+  const number = Number(value);
+
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(
+      `Token revocation config "${key}" must be a non-negative integer`
+    );
+  }
+
+  return number;
+}
+
 const FAILURE_MODES = new Set(["closed", "open"]);
 
 export function normalizeTokenRevocationConfig(source) {
@@ -49,6 +63,10 @@ export function normalizeTokenRevocationConfig(source) {
     maxStalenessSeconds,
     maxFailOpenSeconds,
     failureMode,
+    maxClockSkewSeconds: nonNegativeInteger(
+      source.maxClockSkewSeconds ?? 60,
+      "maxClockSkewSeconds"
+    ),
     retentionSeconds: positiveInteger(
       source.retentionSeconds ?? 7 * 24 * 60 * 60,
       "retentionSeconds"

@@ -1,6 +1,8 @@
 import { BaseService } from "../../../framework/services/BaseService.js";
 
-const JOB_NAME = "tokenRevocation.refresh";
+// 啟動時的跨檔檢查要指名這件工作，所以名字必須匯出而不是各寫各的字串常數：
+// 兩邊的字面值一旦分岔，檢查會靜默地永遠通過。
+export const JOB_NAME = "tokenRevocation.refresh";
 const DEFAULT_INTERVAL_MS = 30_000;
 
 /**

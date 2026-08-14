@@ -39,10 +39,23 @@ const tokenRevocationConfig = {
   // 需要舊行為的話，把這裡設成 "open"。
   failureMode: "closed",
 
+  // 容許本機時鐘與資料庫時鐘相差多少秒。
+  //
+  // 切線取自資料庫時鐘，token 的 iat 取自簽發那台機器的時鐘。兩者不同步時，
+  // 時鐘偏快的節點簽出來的 token 會帶著未來的 iat，逃過 iat < revokedBefore
+  // 的比較——撤銷靜默失守，沒有任何錯誤。
+  //
+  // 這個值有兩個用途：啟動時算進 retentionSeconds 的安全邊界，以及每次刷新
+  // 快照時實測一次真實偏差，超過就記 error。它不會改變撤銷的判定——往切線或
+  // 比較加容忍值會過度撤銷，讓「改密碼後立刻重新登入」拿到一個一簽出來就
+  // 無效的 token。這裡選擇讓偏差被看見，而不是猜著補償它。
+  maxClockSkewSeconds: 60,
+
   // 切線比這個秒數還舊的列會被清理工作刪除。
   //
-  // 必須大於最長的 token 壽命（config/jwt.js 的 expiresIn）。設得太短的話，
-  // 列被刪掉時仍然可能有活著的 token 早於那條切線，已撤銷的 token 會復活。
+  // 必須蓋過最長的 token 壽命（config/jwt.js 的 expiresIn）加上時鐘誤差，啟動
+  // 時會交叉檢查。設得太短的話，列被刪掉時仍然有活著的 token 早於那條切線，
+  // 已撤銷的 token 會復活——30 天的 token 配 7 天的保留期，會復活 23 天。
   // 預設 7 天對應 2h 的 token 壽命，留了很大的餘裕。
   retentionSeconds: 7 * 24 * 60 * 60,
 
