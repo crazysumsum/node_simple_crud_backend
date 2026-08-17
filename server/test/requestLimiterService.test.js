@@ -308,6 +308,85 @@ test("request limiter keeps a slot until timed-out processing actually completes
   assert.equal(limiter.activeRequests, 0);
 });
 
+// --- store 逾時 ---------------------------------------------------------------
+
+// consume() 前後沒有任何逾時：注入的共享 adapter（例如 Redis）在連線池耗盡或
+// 網路分區時可能永遠不 resolve。這段 await 比 bodyReceiveTimeout 和 route 的
+// timeoutMs 都還要早，兩者都要等它 next() 之後才會啟動，activeRequests/queue
+// 也要等 consume() resolve 才更動——所以少了這道逾時，整段完全不受保護。
+test("a hanging store is bounded by storeOperationTimeoutMs and fails closed by default", async () => {
+  const logger = memoryLogger();
+  const hangingStore = { consume: () => new Promise(() => {}) };
+  const limiter = new RequestLimiterService({
+    config: { ...baseConfig, storeOperationTimeoutMs: 20, storeFailureMode: "closed" },
+    logger,
+    time: createTestTime(),
+    store: hangingStore
+  });
+  const response = new MockResponse();
+
+  await limiter.handle(request("stuck"), response, () => {
+    throw new Error("request must not reach the handler while the store is hanging");
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.body.error.code, "SERVICE_UNAVAILABLE");
+  assert.equal(limiter.activeRequests, 0);
+
+  const timeoutEntry = logger.entries.find(
+    (entry) => entry.event === "request.limit.store_timeout"
+  );
+  assert.ok(timeoutEntry);
+  assert.equal(timeoutEntry.level, "error");
+  assert.equal(timeoutEntry.context.failureMode, "closed");
+});
+
+test("storeFailureMode \"open\" lets a request through when the store hangs, but concurrency and the queue still apply", async () => {
+  const logger = memoryLogger();
+  const hangingStore = { consume: () => new Promise(() => {}) };
+  const limiter = new RequestLimiterService({
+    config: {
+      ...baseConfig,
+      storeOperationTimeoutMs: 20,
+      storeFailureMode: "open",
+      maxConcurrentRequests: 1
+    },
+    logger,
+    time: createTestTime(),
+    store: hangingStore
+  });
+  const firstResponse = new MockResponse();
+  let started = false;
+
+  await limiter.handle(request("first"), firstResponse, () => {
+    started = true;
+  });
+
+  assert.equal(started, true);
+  assert.equal(limiter.activeRequests, 1);
+
+  const timeoutEntry = logger.entries.find(
+    (entry) => entry.event === "request.limit.store_timeout"
+  );
+  assert.ok(timeoutEntry);
+  assert.equal(timeoutEntry.context.failureMode, "open");
+
+  // 並行上限與 store 無關，不該連帶跟著失效——第二個請求必須排隊，不能直接啟動。
+  const secondResponse = new MockResponse();
+  let secondStarted = false;
+
+  await limiter.handle(request("second"), secondResponse, () => {
+    secondStarted = true;
+    secondResponse.finish();
+  });
+  assert.equal(secondStarted, false);
+  assert.equal(limiter.queue.length, 1);
+
+  firstResponse.finish();
+  assert.equal(secondStarted, true);
+  assert.equal(limiter.queue.length, 0);
+});
+
 // --- service 生命週期 --------------------------------------------------------
 
 test("stopAccepting and shutdown are separate, so the store is actually closed", async () => {

@@ -11,6 +11,7 @@ import { normalizeRequestLimiterConfig } from "./normalizeRequestLimiterConfig.j
 import { MemoryRateLimitStore, RateLimitStore } from "./RateLimitStore.js";
 
 const TOO_MANY_REQUESTS = "Too Many Requests";
+const STORE_TIMEOUT = Symbol("requestLimiterStoreTimeout");
 
 function requestPath(req) {
   return req.path || String(req.originalUrl || req.url || "").split("?")[0];
@@ -212,16 +213,56 @@ export class RequestLimiterService {
     const quotaKey = clientQuotaKey(clientIp, this.config.ipv6PrefixLength);
 
     let rateLimit;
+    let timeoutHandle;
+    // 逾時的計時器獨立於 consume()——這是唯一能讓這個 await 有上限的辦法，
+    // consume() 本身可能永遠不 resolve（見 store_timeout 分支）。
+    const timedOut = new Promise((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(STORE_TIMEOUT), this.config.storeOperationTimeoutMs);
+      timeoutHandle.unref?.();
+    });
 
     try {
-      rateLimit = await this.store.consume(
+      const consumePromise = this.store.consume(
         `${this.config.storeKeyPrefix}:ip:${quotaKey}`,
         {
           limit: this.config.maxRequestsPerIpPerWindow,
           windowMs: this.config.ipWindowMs
         }
       );
+      // 逾時之後這個 promise 可能還在背景跑，沒有人會再 await 它——不接住的話
+      // 它遲早 reject 成一個 unhandled rejection。
+      consumePromise.catch(() => {});
+
+      const result = await Promise.race([consumePromise, timedOut]);
+      clearTimeout(timeoutHandle);
+
+      if (result === STORE_TIMEOUT) {
+        this.writeSystemLog(
+          "error",
+          "request.limit.store_timeout",
+          "Rate limit store did not respond in time",
+          {
+            requestId,
+            clientIp,
+            storeAdapter: this.config.storeAdapter,
+            storeOperationTimeoutMs: this.config.storeOperationTimeoutMs,
+            failureMode: this.config.storeFailureMode
+          }
+        );
+
+        if (this.config.storeFailureMode === "closed") {
+          this.rejectUnavailable(res);
+          return;
+        }
+
+        // open：store 壞了不該連帶讓並行/佇列這兩層本來就與 store 無關的保護
+        // 也跟著失效，所以只放行 IP 配額這一項判斷，其餘照舊往下走。
+        rateLimit = { allowed: true, remaining: 0, retryAfterMs: 0 };
+      } else {
+        rateLimit = result;
+      }
     } catch (error) {
+      clearTimeout(timeoutHandle);
       this.writeSystemLog(
         "error",
         "request.limit.store_failed",
