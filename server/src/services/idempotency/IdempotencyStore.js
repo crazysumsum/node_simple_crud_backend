@@ -2,10 +2,22 @@ export class IdempotencyStore {
   // begin() must atomically return started, conflict, inProgress, replay,
   // completedWithoutResponse, or capacityExceeded. Shared adapters must
   // provide the same guarantee.
+  //
+  // options.owner is a fencing token: a random value the caller generates for
+  // this one begin() attempt. Shared adapters must persist it alongside the
+  // claimed row and require the same value back on complete()/fail()/
+  // markUnavailable() before writing — otherwise a caller whose lease expired
+  // mid-request can still overwrite or delete the row a different owner has
+  // since claimed. Adapters that don't share state across callers (e.g. an
+  // in-process map with no cross-instance races) may ignore it.
   async begin(_key, _options) {
     throw new Error(`${this.constructor.name} must implement begin()`);
   }
 
+  // Returns true if the write was applied, false if it was rejected because
+  // options.owner no longer matches the row's current lease (someone else
+  // already took over the key). Callers should treat false as a signal worth
+  // logging, not an error to throw.
   async complete(_key, _response, _options) {
     throw new Error(`${this.constructor.name} must implement complete()`);
   }
@@ -24,11 +36,16 @@ export class IdempotencyStore {
    *
    * 用完整的 ttlMs 而不是 pending 租約：租約的作用是讓崩潰的實例解鎖，而這裡
    * 已經確定執行完了，這一列要活到重播窗口結束為止。
+   *
+   * 回傳值意義同 complete()：options.owner 沒對上就是 false。
    */
   async markUnavailable(_key, _options) {}
 
-  /** 釋放一個沒有成功的 key，讓重試可以重新執行。 */
-  async fail(_key) {}
+  /**
+   * 釋放一個沒有成功的 key，讓重試可以重新執行。
+   * 回傳值意義同 complete()：owner 沒對上就是 false。
+   */
+  async fail(_key, _owner) {}
 
   /**
    * 主動刪除已過期的紀錄，由 IdempotencyPurgeJob 定時呼叫。
@@ -87,7 +104,7 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
     return entry;
   }
 
-  async begin(key, { fingerprint, ttlMs, pendingLeaseMs = ttlMs }) {
+  async begin(key, { fingerprint, ttlMs, pendingLeaseMs = ttlMs, owner = "" }) {
     this.cleanup();
     const existing = this.liveEntry(key);
 
@@ -105,6 +122,11 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
       this.entries.set(key, {
         state: "pending",
         fingerprint,
+        // owner 是這次 begin() 的憑證，理由與 MySqlIdempotencyStore 相同：
+        // 單一行程內兩個請求輪流搶同一個 key 時，晚到的 complete／fail 只帶著
+        // 呼叫端記得的 key，查表拿到的卻是新持有者的那個物件——沒有 owner
+        // 可比，就沒有東西能分辨「這是我的租約」還是「這是接手者的」。
+        owner,
         // 處理中的紀錄用租約，不用完整的 TTL：一個掛住的請求不該把 key 鎖到
         // 重播窗口結束。共享 adapter 靠同一個租約在實例崩潰後解鎖，兩邊的語意
         // 因此一致。
@@ -129,34 +151,49 @@ export class MemoryIdempotencyStore extends IdempotencyStore {
     return { state: "replay", response: existing.response };
   }
 
-  async complete(key, response, { ttlMs }) {
+  async complete(key, response, { ttlMs, owner = "" }) {
     const existing = this.liveEntry(key);
 
-    if (!existing) {
-      return;
+    // state 與 fail() 晚到的删除是同一組理由：只有仍在處理中、且仍是自己的
+    // 那一列該被改寫。owner 不對代表這個 key 已經被接手了。
+    if (!existing || existing.state !== "pending" || existing.owner !== owner) {
+      return false;
     }
 
     existing.state = "completed";
     existing.response = response;
     existing.expiresAt = this.now() + ttlMs;
+    return true;
   }
 
-  async markUnavailable(key, { ttlMs }) {
+  async markUnavailable(key, { ttlMs, owner = "" }) {
     const existing = this.liveEntry(key);
 
-    // 只有仍在處理中的那一列該被改寫。已經 completed 的列被降級成
-    // completedWithoutResponse，等於把一個還能重播的回應丟掉。
-    if (!existing || existing.state !== "pending") {
-      return;
+    // 只有仍在處理中、且仍是自己的那一列該被改寫。已經 completed 的列被降級成
+    // completedWithoutResponse，等於把一個還能重播的回應丟掉；owner 不對代表
+    // 這一列已經是別人的租約。
+    if (!existing || existing.state !== "pending" || existing.owner !== owner) {
+      return false;
     }
 
     existing.state = "unavailable";
     existing.response = null;
     existing.expiresAt = this.now() + ttlMs;
+    return true;
   }
 
-  async fail(key) {
+  async fail(key, owner = "") {
+    const existing = this.entries.get(key);
+
+    // 不用 liveEntry：一列剛好在這一刻過期但還沒被回收，仍然是它真正持有者
+    // 唯一能釋放的對象，語意不該因為掃描的節流時機而改變。owner 不對代表這個
+    // key 已經被接手，刪的話會把接手者仍在使用的租約砍掉。
+    if (!existing || existing.owner !== owner) {
+      return false;
+    }
+
     this.entries.delete(key);
+    return true;
   }
 
   /**

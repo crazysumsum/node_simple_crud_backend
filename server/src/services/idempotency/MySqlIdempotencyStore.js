@@ -50,8 +50,8 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
     this.purgeMaxBatches = purgeMaxBatches;
   }
 
-  async begin(key, { fingerprint, ttlMs, pendingLeaseMs = ttlMs }) {
-    if (await this.claim(key, fingerprint, pendingLeaseMs)) {
+  async begin(key, { fingerprint, ttlMs, pendingLeaseMs = ttlMs, owner = "" }) {
+    if (await this.claim(key, fingerprint, pendingLeaseMs, owner)) {
       return { state: "started" };
     }
 
@@ -65,7 +65,7 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
     // 互相刪掉對方的列而永遠繞下去。
     await this.deleteExpired(key);
 
-    if (await this.claim(key, fingerprint, pendingLeaseMs)) {
+    if (await this.claim(key, fingerprint, pendingLeaseMs, owner)) {
       return { state: "started" };
     }
 
@@ -76,13 +76,20 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
     return winner ? this.classify(winner, fingerprint) : { state: "inProgress" };
   }
 
-  /** INSERT 成功即取得這個 key；主鍵衝突代表別人先到。 */
-  async claim(key, fingerprint, pendingLeaseMs) {
+  /**
+   * INSERT 成功即取得這個 key；主鍵衝突代表別人先到。
+   *
+   * owner 隨這次 claim 一起寫入，是後面 complete／fail／markUnavailable 唯一
+   * 能證明「這一列還是我的」的憑證。租約過期後別人可以刪掉這列重搶，那一刻
+   * 起 owner 就換了人——原本的呼叫者拿著舊值回來寫，WHERE 會擋下它，而不是
+   * 讓它覆寫或刪掉接手者的資料。
+   */
+  async claim(key, fingerprint, pendingLeaseMs, owner) {
     try {
       await this.database.execute(
-        `INSERT INTO ${TABLE} (store_key, fingerprint, state, expires_at)
-         VALUES (?, ?, 'pending', UNIX_TIMESTAMP() + ?)`,
-        [key, fingerprint, this.leaseSeconds(pendingLeaseMs)]
+        `INSERT INTO ${TABLE} (store_key, fingerprint, state, lease_owner, expires_at)
+         VALUES (?, ?, 'pending', ?, UNIX_TIMESTAMP() + ?)`,
+        [key, fingerprint, owner, this.leaseSeconds(pendingLeaseMs)]
       );
       return true;
     } catch (error) {
@@ -137,7 +144,12 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
     );
   }
 
-  async complete(key, response, { ttlMs }) {
+  /**
+   * 回傳這次寫入是否真的套用到那一列（affectedRows === 1）。false 代表租約
+   * 在這次呼叫抵達前就已經易主：owner 不比對的話，pendingLeaseMs 保護不了
+   * 「同一列被兩個持有者輪流覆寫」，只保護得了「已完成的列被誤判成 pending」。
+   */
+  async complete(key, response, { ttlMs, owner = "" }) {
     const body = response.body === undefined ? null : JSON.stringify(response.body);
 
     if (body !== null && Buffer.byteLength(body, "utf8") > this.maxResponseBytes) {
@@ -151,46 +163,52 @@ export class MySqlIdempotencyStore extends IdempotencyStore {
       );
     }
 
-    // state='pending' 這個條件擋掉一個晚到的寫入覆蓋已完成的紀錄。租約已經
-    // 過期的寫入者理論上不存在——pendingLeaseMs 在啟動時被強制大於每一條
-    // route 的 timeoutMs，所以請求一定先被逾時中止——但這個條件是免費的。
-    await this.database.execute(
+    // state='pending' 擋掉一個晚到的寫入覆蓋已完成的紀錄；lease_owner 擋掉一個
+    // 晚到的寫入覆蓋「租約過期後被別的持有者接手、但還在 pending」的那一列——
+    // 前者防的是狀態倒退，後者防的是張冠李戴，state 相同擋不住它。
+    const [result] = await this.database.execute(
       `UPDATE ${TABLE}
        SET state = 'completed',
            status_code = ?,
            response = ?,
            expires_at = UNIX_TIMESTAMP() + ?
-       WHERE store_key = ? AND state = 'pending'`,
-      [Number(response.statusCode), body, this.leaseSeconds(ttlMs), key]
+       WHERE store_key = ? AND state = 'pending' AND lease_owner = ?`,
+      [Number(response.statusCode), body, this.leaseSeconds(ttlMs), key, owner]
     );
+
+    return Number(result?.affectedRows ?? 0) === 1;
   }
 
   /**
    * 記下「成功執行完，但回應沒有保存」。expires_at 用完整的 TTL——租約的作用是
-   * 讓崩潰的實例解鎖，而這裡已經確定執行完了。
+   * 讓崩潰的實例解鎖，而這裡已經確定執行完了。回傳值意義同 complete()。
    */
-  async markUnavailable(key, { ttlMs }) {
-    // state='pending' 這個條件與 complete() 同一個理由：只有仍在處理中的列
-    // 該被改寫。把一個已經 completed 的列降級成 unavailable，等於丟掉一個
-    // 還能重播的回應。
-    await this.database.execute(
+  async markUnavailable(key, { ttlMs, owner = "" }) {
+    // 條件與 complete() 同一組理由：state='pending' 擋狀態倒退，lease_owner
+    // 擋張冠李戴。
+    const [result] = await this.database.execute(
       `UPDATE ${TABLE}
        SET state = 'unavailable',
            status_code = NULL,
            response = NULL,
            expires_at = UNIX_TIMESTAMP() + ?
-       WHERE store_key = ? AND state = 'pending'`,
-      [this.leaseSeconds(ttlMs), key]
+       WHERE store_key = ? AND state = 'pending' AND lease_owner = ?`,
+      [this.leaseSeconds(ttlMs), key, owner]
     );
+
+    return Number(result?.affectedRows ?? 0) === 1;
   }
 
-  async fail(key) {
-    // 只釋放仍在處理中的列。已完成的紀錄必須留到 TTL 結束，否則一次晚到的
-    // 釋放會把一個可重播的回應刪掉。
-    await this.database.execute(
-      `DELETE FROM ${TABLE} WHERE store_key = ? AND state = 'pending'`,
-      [key]
+  /** 只釋放自己仍持有、且仍在處理中的列。回傳值意義同 complete()。 */
+  async fail(key, owner = "") {
+    // 已完成的紀錄必須留到 TTL 結束，否則一次晚到的釋放會把一個可重播的回應
+    // 刪掉；lease_owner 則擋掉一次晚到的釋放刪掉別人已經接手的租約。
+    const [result] = await this.database.execute(
+      `DELETE FROM ${TABLE} WHERE store_key = ? AND state = 'pending' AND lease_owner = ?`,
+      [key, owner]
     );
+
+    return Number(result?.affectedRows ?? 0) === 1;
   }
 
   async purge() {
