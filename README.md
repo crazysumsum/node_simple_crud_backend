@@ -23,8 +23,8 @@ log file dates use this IANA time zone through the injected `time` service.
 2. Create environment files:
 
    ```bash
-   cp .env.example server/.env
-   cp .env.example client/.env
+   cp server/.env.example server/.env
+   cp client/.env.example client/.env
    ```
 
 3. Prepare MySQL.
