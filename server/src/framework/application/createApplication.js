@@ -111,8 +111,53 @@ function describeRequestBudget(application, jsonBodyLimit) {
     maxSlotHoldMs:
       application.requestReceiveTimeoutMs +
       application.connectionsCheckingIntervalMs +
-      application.requestTimeoutMs
+      application.requestTimeoutMs,
+    // 這四個逾時全部守著「一條連線活多久」，沒有一個管「同時能有幾條」——
+    // maxConnections 是唯一頂著這件事的設定，值得跟上面幾個放在同一份日誌裡。
+    maxConnections: application.maxConnections
   };
+}
+
+/**
+ * 監看目前的連線數，逼近 maxConnections 時記一筆警告。
+ *
+ * Node 對超過 server.maxConnections 的 socket 是直接 destroy，不會有任何事件
+ * 或錯誤可以掛勾——這個計數是唯一能看見「快滿了」或「已經在拒絕新連線」的
+ * 辦法。節流成每分鐘一則：滿載本身可能持續很久，重點是知道正在發生、以及
+ * 這段期間見過的峰值，不是每一條新連線都留一筆。
+ */
+function watchConnectionCapacity(server, { maxConnections, logger, time }) {
+  let activeConnections = 0;
+  let peakSinceLastLog = 0;
+  let lastLogAt = 0;
+
+  server.on("connection", (socket) => {
+    activeConnections += 1;
+    peakSinceLastLog = Math.max(peakSinceLastLog, activeConnections);
+    socket.once("close", () => {
+      activeConnections = Math.max(0, activeConnections - 1);
+    });
+
+    if (activeConnections < maxConnections) {
+      return;
+    }
+
+    const now = time.nowMs();
+
+    if (now - lastLogAt < 60000) {
+      return;
+    }
+
+    lastLogAt = now;
+    const peak = peakSinceLastLog;
+    peakSinceLastLog = activeConnections;
+
+    void logger.warn(
+      "http.connections_at_capacity",
+      "HTTP connection count reached maxConnections; further connections are being dropped",
+      { activeConnections, peakSinceLastLog: peak, maxConnections }
+    );
+  });
 }
 
 class Application {
@@ -178,6 +223,16 @@ class Application {
         },
         this.app
       );
+      // 四個逾時管的是「一條連線能活多久」，這個管的是「同時能有幾條」——
+      // 慢速攻擊在逾時到期前不斷開新連線頂替被切斷的那些，耗盡的是 fd，跟
+      // 連線是否逾時無關。Node 在 accept() 之後、走到 requestTimeout 等任何
+      // 邏輯之前就會直接關掉超過上限的 socket。
+      server.maxConnections = application.maxConnections;
+      watchConnectionCapacity(server, {
+        maxConnections: application.maxConnections,
+        logger: this.logger,
+        time: this.time
+      });
       server.listen(application.port, application.host, () => resolve(server));
       server.once("error", reject);
     });

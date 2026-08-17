@@ -162,6 +162,23 @@ function crossSectionChecks(normalized, details, { heapLimitBytes }) {
     return;
   }
 
+  // maxConnections 擋在限流器之前：一條連線要先被 accept，才輪得到限流器判斷
+  // 要不要處理它。上限比限流器自己能撐住的並行加排隊還小，代表正常滿載時
+  // socket 就會先被砍，limiter 的 429／佇列永遠等不到——那不是背壓，是設定
+  // 錯誤，且症狀是客戶端看到連線被直接切斷，不會有任何 HTTP 回應可以指回這裡。
+  const worstCaseConnections =
+    requestLimiter.maxConcurrentRequests + requestLimiter.maxQueueSize;
+
+  if (application.maxConnections < worstCaseConnections) {
+    details.push({
+      section: "application",
+      message:
+        `"maxConnections" (${application.maxConnections}) must be at least ` +
+        `requestLimiter.maxConcurrentRequests + maxQueueSize (${worstCaseConnections}), or ` +
+        "ordinary full load gets its connection dropped before the request limiter ever sees it."
+    });
+  }
+
   // 一個請求同一時間最多佔一個連線等待者。隊列容不下滿載的並行請求數，正常
   // 滿載時就會開始回 503——那不是背壓，是設定錯誤。
   const worstCaseWaiters =

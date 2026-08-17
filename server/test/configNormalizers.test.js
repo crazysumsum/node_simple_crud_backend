@@ -318,7 +318,8 @@ const VALID_APPLICATION = Object.freeze({
   headersReceiveTimeoutMs: 10000,
   bodyReceiveTimeoutMs: 10000,
   connectionsCheckingIntervalMs: 2000,
-  shutdownTimeoutMs: 30000
+  shutdownTimeoutMs: 30000,
+  maxConnections: 512
 });
 
 test("application config requires a host", () => {
@@ -372,7 +373,8 @@ test("application config rejects non-positive timeouts", () => {
     "headersReceiveTimeoutMs",
     "bodyReceiveTimeoutMs",
     "connectionsCheckingIntervalMs",
-    "shutdownTimeoutMs"
+    "shutdownTimeoutMs",
+    "maxConnections"
   ]) {
     for (const value of [0, -1, 1.5, "soon", undefined]) {
       assert.throws(

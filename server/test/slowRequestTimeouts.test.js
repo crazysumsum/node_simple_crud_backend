@@ -7,7 +7,10 @@ import test from "node:test";
 import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { createBodyReceiveTimeoutMiddleware } from "../src/framework/middleware/bodyReceiveTimeout.js";
-import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
+import {
+  defaultConfigurationSource,
+  validateApplicationConfiguration
+} from "../src/framework/configuration/applicationConfiguration.js";
 import { normalizeApplicationConfig } from "../src/framework/configuration/normalizeApplicationConfig.js";
 import { validateApiConfig } from "../src/framework/middleware/apiDispatcher.js";
 import { fakeDatabaseOptions } from "../test-support/fakeMySqlPool.js";
@@ -25,7 +28,8 @@ const VALID = Object.freeze({
   headersReceiveTimeoutMs: 10000,
   bodyReceiveTimeoutMs: 10000,
   connectionsCheckingIntervalMs: 2000,
-  shutdownTimeoutMs: 30000
+  shutdownTimeoutMs: 30000,
+  maxConnections: 512
 });
 
 // --- 設定的關係鏈 --------------------------------------------------------------
@@ -110,6 +114,47 @@ test("the shipped defaults satisfy their own chain", async () => {
   assert.ok(config.headersReceiveTimeoutMs <= config.requestReceiveTimeoutMs);
   assert.ok(config.bodyReceiveTimeoutMs <= config.requestReceiveTimeoutMs);
   assert.ok(config.connectionsCheckingIntervalMs <= config.headersReceiveTimeoutMs);
+});
+
+// --- 全域連線上限 ----------------------------------------------------------------
+//
+// 上面四個逾時都管「一條連線能活多久」，沒有一個管「同時能有幾條」。header 還
+// 沒收完的連線也是一個已經 accept 的 socket，佔著一個 fd；headersTimeout 到期
+// 前，攻擊者可以不斷開新的慢速連線頂替被切斷的那些，直到耗盡 fd——跟連線是否
+// 逾時完全無關。maxConnections 是唯一頂著這件事的設定。
+
+test("maxConnections must be able to hold a full load of requests", () => {
+  // 上限比限流器自己能撐住的並行加排隊還小，代表正常滿載時 socket 就會先被
+  // 砍，limiter 的 429／佇列永遠等不到——那不是背壓，是設定錯誤，而且症狀是
+  // 連線被直接切斷，沒有任何 HTTP 回應可以指回這裡。
+  const source = defaultConfigurationSource();
+
+  assert.throws(
+    () =>
+      validateApplicationConfiguration({
+        ...source,
+        application: { ...source.application, maxConnections: 250 },
+        requestLimiter: {
+          ...source.requestLimiter,
+          maxConcurrentRequests: 100,
+          maxQueueSize: 200
+        }
+      }),
+    /"maxConnections" \(250\) must be at least requestLimiter\.maxConcurrentRequests \+ maxQueueSize \(300\)/
+  );
+
+  // 剛好夠是可以的。
+  assert.ok(
+    validateApplicationConfiguration({
+      ...source,
+      application: { ...source.application, maxConnections: 300 },
+      requestLimiter: {
+        ...source.requestLimiter,
+        maxConcurrentRequests: 100,
+        maxQueueSize: 200
+      }
+    })
+  );
 });
 
 // --- 每條 route 的覆寫 ---------------------------------------------------------
@@ -410,6 +455,63 @@ test("the server carries the configured socket timeouts", async (t) => {
   assert.equal(application.server.requestTimeout, 90000);
   assert.equal(application.server.headersTimeout, 8000);
   assert.equal(application.server.connectionsCheckingInterval, 1500);
+});
+
+/** 連上但什麼都不送——連 header 都沒開始，純粹只佔一個 fd。 */
+function openSocket(port) {
+  const socket = net.connect(port, "127.0.0.1");
+  socket.on("error", () => {});
+  return socket;
+}
+
+test("connections beyond maxConnections are dropped immediately, not after the header timeout", async (t) => {
+  // headersReceiveTimeoutMs 刻意留在遠大於測試等待時間的地方：如果多出來的
+  // socket 是因為逾時才斷線，這個測試會等不到就失敗，證明擋下它們的是
+  // maxConnections 而不是任何一個逾時。
+  const { port } = await startApplication(t, {
+    application: { maxConnections: 3, headersReceiveTimeoutMs: 60000 },
+    requestLimiter: { maxConcurrentRequests: 1, maxQueueSize: 0 }
+  });
+
+  const attackers = Array.from({ length: 5 }, () => openSocket(port));
+  t.after(() => attackers.forEach((socket) => socket.destroy()));
+
+  await wait(300);
+
+  const accepted = attackers.filter((socket) => !socket.destroyed);
+  const rejected = attackers.filter((socket) => socket.destroyed);
+
+  // Node 在 accept() 之後立刻依 maxConnections 決定去留，這一刻甚至還沒有
+  // header——多出來的兩個必須已經被砍掉，剩下的三個原封不動地開著。
+  assert.equal(accepted.length, 3);
+  assert.equal(rejected.length, 2);
+});
+
+test("closing the excess connections returns capacity to legitimate requests", async (t) => {
+  const { url, port } = await startApplication(t, {
+    application: { maxConnections: 3, headersReceiveTimeoutMs: 60000 },
+    requestLimiter: { maxConcurrentRequests: 1, maxQueueSize: 0 }
+  });
+
+  // 打滿連線上限，模擬耗盡 fd 攻擊的高峰。
+  const attackers = Array.from({ length: 3 }, () => openSocket(port));
+  t.after(() => attackers.forEach((socket) => socket.destroy()));
+  await wait(300);
+  assert.equal(attackers.every((socket) => !socket.destroyed), true);
+
+  // 上限已經打滿，這一刻連合法請求都進不來——這正是攻擊想製造的效果。
+  await assert.rejects(() => fetch(`${url}/api/v1/echo`, { signal: AbortSignal.timeout(300) }));
+
+  // 攻擊停止、連線收回,容量要立刻還回去，不必等任何逾時。
+  attackers.forEach((socket) => socket.destroy());
+  await wait(100);
+
+  const response = await fetch(`${url}/api/v1/echo`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ recovered: true })
+  });
+  assert.equal(response.status, 200);
 });
 
 // --- multipart ----------------------------------------------------------------

@@ -78,7 +78,21 @@ const applicationConfig = {
 
   // Graceful shutdown 最長等待時間，單位為毫秒。超時後會強制關閉剩餘 HTTP 連線，
   // 然後繼續關閉 MySQL pool 及 flush logs，避免部署或重啟永久卡住。
-  shutdownTimeoutMs: Number(process.env.SHUTDOWN_TIMEOUT_MS || 30000)
+  shutdownTimeoutMs: Number(process.env.SHUTDOWN_TIMEOUT_MS || 30000),
+
+  // 這個行程同時願意持有的 HTTP socket 數量上限，對應 Node 的 server.maxConnections。
+  //
+  // 上面四個逾時管的是「一條連線可以活多久」，不是「同時能有幾條連線」——
+  // headersTimeout 到期前，攻擊者可以在時限內不斷開新的慢速連線頂替被切斷的
+  // 那些，用來耗盡的是檔案描述符（accept 一條連線就佔一個 fd），跟連線是否已
+  // 逾時無關。maxConnections 補的正是這一段：Node 在 accept() 之後、應用碰到
+  // 這條連線之前就會直接關掉超過上限的 socket，無論它的 header 有沒有收完。
+  //
+  // 預設 512：留在常見的 1024 軟性 fd 上限之內，扣掉 MySQL pool
+  // （database.connectionLimit，預設 10）、log 檔案與 stdio 之後還有餘裕；同時
+  // 遠大於 requestLimiter.maxConcurrentRequests + maxQueueSize（預設 300）的
+  // worst case，讓正常滿載不會先被這一層擋下——啟動時會檢查這個關係。
+  maxConnections: Number(process.env.APP_MAX_CONNECTIONS || 512)
 };
 
 export default applicationConfig;
