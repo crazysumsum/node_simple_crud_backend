@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { ApplicationError } from "../../framework/errors/ApplicationError.js";
 import {
   IdempotencyStore,
@@ -189,13 +189,18 @@ export class IdempotencyService {
         })
       )
     );
+    // 這次 begin() 的憑證，往下每一次 complete／fail／markUnavailable 都帶著它。
+    // 租約過期後別人可以接手同一個 key，那一刻起這個值就不再對得上那一列——
+    // 這是唯一能讓「晚到的寫入」被拒絕而不是覆寫接手者資料的東西。
+    const owner = randomBytes(16).toString("hex");
     let begin;
 
     try {
       begin = await this.store.begin(storeKey, {
         fingerprint,
         ttlMs: routeOptions.ttlMs,
-        pendingLeaseMs: this.config.pendingLeaseMs
+        pendingLeaseMs: this.config.pendingLeaseMs,
+        owner
       });
     } catch (error) {
       throw new IdempotencyError(
@@ -289,23 +294,28 @@ export class IdempotencyService {
       // handler 回了不可快取的狀態碼——這次沒有成功，釋放 key 讓重試重新執行。
       // 這是 fail() 唯一還該出現在成功路徑上的地方。
       if (!succeeded) {
-        await this.store.fail(storeKey);
+        this.logIfLeaseLost(
+          await this.store.fail(storeKey, owner),
+          req,
+          "fail_after_uncacheable_status"
+        );
         return result;
       }
 
       // 成功了，但沒有經過 res.json()——檔案下載走 res.end()，就是這一種。
       // 沒有可重播的回應，但業務操作確實做完了。
       if (responseBody === undefined) {
-        await this.markUnavailable(storeKey, req, routeOptions, "no_response_body");
+        await this.markUnavailable(storeKey, req, routeOptions, "no_response_body", owner);
         return result;
       }
 
       try {
-        await this.store.complete(
+        const applied = await this.store.complete(
           storeKey,
           { statusCode: res.statusCode, body: responseBody },
-          { ttlMs: routeOptions.ttlMs }
+          { ttlMs: routeOptions.ttlMs, owner }
         );
+        this.logIfLeaseLost(applied, req, "complete");
       } catch (error) {
         void this.logger?.error?.("idempotency.store.complete_failed", "Failed to save idempotent response", {
           requestId: req.requestId || null,
@@ -314,7 +324,7 @@ export class IdempotencyService {
         // 回應存不下來（資料庫故障，或大於 maxResponseBytes）。先前這裡只記
         // 一筆日誌就回傳成功，於是那一列留在 pending：租約到期之後重試會重新
         // 執行一個已經成功的操作，而客戶端兩次都看到成功。
-        await this.markUnavailable(storeKey, req, routeOptions, "store_failed");
+        await this.markUnavailable(storeKey, req, routeOptions, "store_failed", owner);
       }
 
       return result;
@@ -322,7 +332,9 @@ export class IdempotencyService {
       // 釋放失敗的後果是 key 卡在 inProgress 直到 TTL 到期，客戶端拿著同一個
       // key 重試會一路收到 409。原本的錯誤仍要往上拋，但這件事必須看得見，
       // 否則現場只會看到「重試莫名其妙全部 409」而找不到原因。
-      await this.store.fail(storeKey).catch((releaseError) => {
+      try {
+        this.logIfLeaseLost(await this.store.fail(storeKey, owner), req, "fail_after_error");
+      } catch (releaseError) {
         void this.logger?.error?.(
           "idempotency.store.release_failed",
           "Failed to release an idempotency key after a failed request",
@@ -333,7 +345,7 @@ export class IdempotencyService {
             error: { name: releaseError.name, message: releaseError.message }
           }
         );
-      });
+      }
       throw error;
     } finally {
       res.json = originalJson;
@@ -348,9 +360,13 @@ export class IdempotencyService {
    * 殘餘情況（要救它得在同一個交易裡完成業務操作與 idempotency 寫入，而框架
    * 管不到 handler 的交易邊界），所以它必須是一筆 error 而不是 warn。
    */
-  async markUnavailable(storeKey, req, routeOptions, reason) {
+  async markUnavailable(storeKey, req, routeOptions, reason, owner) {
     try {
-      await this.store.markUnavailable(storeKey, { ttlMs: routeOptions.ttlMs });
+      const applied = await this.store.markUnavailable(storeKey, {
+        ttlMs: routeOptions.ttlMs,
+        owner
+      });
+      this.logIfLeaseLost(applied, req, reason);
     } catch (error) {
       void this.logger?.error?.(
         "idempotency.store.mark_unavailable_failed",
@@ -364,6 +380,33 @@ export class IdempotencyService {
         }
       );
     }
+  }
+
+  /**
+   * store 的寫入方法回傳 false，代表這次呼叫帶的 owner 已經對不上那一列——
+   * 租約在這個請求還在跑的時候就過期，被別的呼叫者接手了。fencing 保護的是
+   * 資料不被寫錯，但「發生過」這件事本身值得留下記錄：它代表某個 handler
+   * 活得比自己的 idempotency 租約還久，而多實例部署下這一列現在的內容由
+   * 接手者決定，不是這個請求。
+   *
+   * 沒有 fencing 能力的 adapter（例如只實作最小介面的替身）回傳 undefined，
+   * 這裡當作「沒有訊號」而不是「租約遺失」，不記錯誤。
+   */
+  logIfLeaseLost(applied, req, reason) {
+    if (applied !== false) {
+      return;
+    }
+
+    void this.logger?.error?.(
+      "idempotency.lease_lost",
+      "An idempotency lease expired before this request finished and was reclaimed by another caller; this write was discarded instead of overwriting the new owner's record",
+      {
+        requestId: req.requestId || null,
+        path: req.apiRoute?.path ?? null,
+        reason,
+        pendingLeaseMs: this.config.pendingLeaseMs
+      }
+    );
   }
 
   /** 刪除過期紀錄。由 IdempotencyPurgeJob 以 cluster scope 排程。 */

@@ -20,12 +20,16 @@ USE erp_dev;
 --               只為了一件事：讓重試拿到 409 而不是重新執行一個已經做完的操作。
 --               status_code 與 response 為 NULL，expires_at 用完整的 TTL。
 --
--- 這張表的欄位沒有變過，unavailable 只是 state 多了一個值——既有部署不需要
--- 執行任何 DDL。
+-- lease_owner 是這一次 begin() 的隨機憑證，寫入時同時附帶。租約過期後別的
+-- 呼叫者可以刪掉這一列重搶，一旦搶到，這欄就換成新的值；原本那個晚到的
+-- complete／fail／markUnavailable 帶著舊的 owner，UPDATE／DELETE 會影響 0 列，
+-- 而不是覆寫或刪掉接手者的資料。不比對這一欄的話，兩個持有者可以在同一列上
+-- 互相覆蓋——沒有任何症狀，只有回應對不上或客戶端被鎖住。
 CREATE TABLE IF NOT EXISTS fr_idempotency_keys (
   store_key   VARCHAR(255)      NOT NULL,
   fingerprint CHAR(64)          NOT NULL,
   state       VARCHAR(16)       NOT NULL,
+  lease_owner CHAR(32)          NOT NULL DEFAULT '',
   status_code SMALLINT UNSIGNED NULL,
   response    MEDIUMTEXT        NULL,
   expires_at  BIGINT UNSIGNED   NOT NULL,
@@ -33,3 +37,8 @@ CREATE TABLE IF NOT EXISTS fr_idempotency_keys (
   -- 清理工作按 expires_at 分批刪除。
   KEY fr_idempotency_keys_expires_at (expires_at)
 );
+
+-- 既有部署：這張表原本沒有 lease_owner。DEFAULT '' 讓既有列在 ALTER 之後仍然
+-- 合法，但那些列此刻沒有真正的持有者——下一次晚到的寫入仍然可能命中它們，
+-- 直到它們自然過期或被下一輪 begin() 換上新的 owner 為止。手動執行：
+--   ALTER TABLE fr_idempotency_keys ADD COLUMN lease_owner CHAR(32) NOT NULL DEFAULT '' AFTER state;
