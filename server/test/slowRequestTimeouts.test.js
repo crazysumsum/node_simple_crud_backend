@@ -246,7 +246,14 @@ function collectingLogger() {
   const entries = [];
   const write = (level) => async (event, message, context) =>
     entries.push({ level, event, context });
-  return { entries, debug: write("debug"), info: write("info"), warn: write("warn"), error: write("error") };
+  return {
+    entries,
+    debug: write("debug"),
+    info: write("info"),
+    warn: write("warn"),
+    error: write("error"),
+    isSensitiveField: () => false
+  };
 }
 
 test("the watchdog refuses to be built without a usable timeout", () => {
@@ -357,7 +364,8 @@ async function startApplication(t, overrides = {}) {
     },
     logger: {
       debug: async () => {}, info: async () => {}, warn: async () => {},
-      error: async () => {}, flush: async () => {}
+      error: async () => {}, flush: async () => {},
+      isSensitiveField: () => false
     },
     requestLogger: (_req, _res, next) => next(),
     serviceOptions: { mysqldatabase: fakeDatabaseOptions() },
@@ -427,7 +435,7 @@ test("the slow client is told why, and the log says how little it sent", async (
     socket.once("connect", resolve);
   });
   socket.write(
-    "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+    "POST /api/v1/echo?token=leaked HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
       "Content-Type: application/json\r\nContent-Length: 100000\r\n\r\n" +
       '{"a":"'
   );

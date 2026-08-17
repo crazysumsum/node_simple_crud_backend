@@ -103,7 +103,8 @@ function memoryLogger() {
     debug: write("debug"),
     info: write("info"),
     warn: write("warn"),
-    error: write("error")
+    error: write("error"),
+    isSensitiveField: () => false
   };
 }
 

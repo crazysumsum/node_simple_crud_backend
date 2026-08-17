@@ -18,7 +18,8 @@ const silentLogger = {
   info: async () => {},
   warn: async () => {},
   error: async () => {},
-  flush: async () => {}
+  flush: async () => {},
+  isSensitiveField: () => false
 };
 
 async function startApplication(

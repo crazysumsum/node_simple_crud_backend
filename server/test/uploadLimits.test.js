@@ -503,7 +503,8 @@ test("startup states the worst-case upload memory, because nobody computes it", 
     debug: async () => {},
     warn: async () => {},
     error: async () => {},
-    info: async (event, message, context) => logs.push({ event, context })
+    info: async (event, message, context) => logs.push({ event, context }),
+    isSensitiveField: () => false
   };
 
   class UploadHandler extends BaseRequestHandler {

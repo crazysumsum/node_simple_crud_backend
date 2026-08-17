@@ -27,7 +27,8 @@ test("request timeout returns the standard 504 response and aborts req.requestTi
   const logger = {
     warn: async (event, message, context) => {
       entries.push({ event, message, context });
-    }
+    },
+    isSensitiveField: () => false
   };
   const app = express();
   const time = createTestTime();
@@ -78,7 +79,8 @@ test("a timeout during a streamed response aborts the connection instead of thro
     },
     error: async (event, message, context) => {
       entries.push({ event, message, context });
-    }
+    },
+    isSensitiveField: () => false
   };
   const app = express();
   const time = createTestTime();

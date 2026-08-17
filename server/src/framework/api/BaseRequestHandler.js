@@ -7,6 +7,7 @@ import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
 import { ApplicationError } from "../errors/ApplicationError.js";
 import { sendSuccess } from "../http/apiResponse.js";
 import { sendFileResponse } from "../http/fileResponse.js";
+import { redactUrl } from "../../services/logging/redactUrl.js";
 
 const HANDLER_RESPONSE = Symbol("handlerResponse");
 const HANDLER_FILE_RESPONSE = Symbol("handlerFileResponse");
@@ -113,6 +114,11 @@ export class BaseRequestHandler {
       res.getHeader?.("x-request-id") ||
       null;
     let handlerError;
+    // this.logger 可能是 null（optionalService），所以遮蔽用的判斷式要能安全處理。
+    const url = redactUrl(
+      req.originalUrl || req.url,
+      (field) => this.logger?.isSensitiveField(field) ?? false
+    );
 
     // 日誌落盤不應擋在請求路徑上。框架其他地方（dispatcher、限流、生命週期）
     // 都用 void 送出，這裡先前的 await 會讓每個請求多等兩次檔案寫入。
@@ -124,7 +130,7 @@ export class BaseRequestHandler {
         requestId,
         handler: this.handlerName,
         method: req.method,
-        url: req.originalUrl || req.url,
+        url,
         startTime: this.time.timestamp(startTime)
       }
     );
@@ -208,7 +214,7 @@ export class BaseRequestHandler {
         requestId,
         handler: this.handlerName,
         method: req.method,
-        url: req.originalUrl || req.url,
+        url,
         startTime: this.time.timestamp(startTime),
         endTime: this.time.timestamp(endTime),
         durationMs: Number(durationNs) / 1_000_000,

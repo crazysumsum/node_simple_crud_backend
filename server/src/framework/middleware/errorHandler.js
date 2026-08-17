@@ -1,5 +1,6 @@
 import { ApplicationError } from "../errors/ApplicationError.js";
 import { sendError } from "../http/apiResponse.js";
+import { redactUrl } from "../../services/logging/redactUrl.js";
 
 function normalizeError(error) {
   if (error instanceof ApplicationError) {
@@ -48,7 +49,7 @@ export function createErrorHandler({ logger, time } = {}) {
     void logger.error("http.request_failed", "HTTP request failed", {
       requestId: req.requestId || null,
       method: req.method,
-      url: req.originalUrl || req.url,
+      url: redactUrl(req.originalUrl || req.url, (field) => logger.isSensitiveField(field)),
       api: req.apiRoute || null,
       error: {
         name: applicationError.name,

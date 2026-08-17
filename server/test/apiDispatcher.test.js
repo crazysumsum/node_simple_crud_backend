@@ -28,7 +28,8 @@ const silentLogger = {
   debug: async () => {},
   info: async () => {},
   warn: async () => {},
-  error: async () => {}
+  error: async () => {},
+  isSensitiveField: () => false
 };
 const emptyRequestSchema = {};
 const anySuccessResponseSchema = { 200: {} };
@@ -342,6 +343,56 @@ test("dispatcher validates request schemas before invoking the handler", async (
         entry.context.requestId === "invalid-schema-request" &&
         entry.context.error.code === "REQUEST_VALIDATION_FAILED"
     )
+  );
+});
+
+test("errorHandler redacts sensitive query values before logging the URL", async (t) => {
+  const systemLogs = [];
+  const logger = {
+    ...silentLogger,
+    error: async (event, message, context) => {
+      systemLogs.push({ event, message, context });
+    },
+    isSensitiveField: (field) => field.toLowerCase() === "token"
+  };
+  const dispatcher = createApiDispatcher({
+    routes: [
+      {
+        ...apiRouteDefaults,
+        method: "GET",
+        path: "/api/v1/secure-item/:id",
+        description: "Validate a secure item lookup.",
+        authType: "public",
+        requestSchema: {
+          params: {
+            type: "object",
+            required: ["id"],
+            additionalProperties: false,
+            properties: { id: { type: "integer", minimum: 1 } }
+          }
+        },
+        responseSchema: anySuccessResponseSchema,
+        handler: "secureHandler"
+      }
+    ],
+    handlers: {
+      secureHandler: new TestHandler("secureHandler", () => ({ ok: true }))
+    },
+    logger
+  });
+  const baseUrl = await startTestServer(t, dispatcher, logger);
+
+  await fetch(
+    `${baseUrl}/api/v1/secure-item/not-a-number?token=super-secret&active=true`
+  );
+
+  const failureLog = systemLogs.find(
+    (entry) => entry.event === "http.request_failed"
+  );
+  assert.ok(failureLog, "expected a http.request_failed log entry");
+  assert.equal(
+    failureLog.context.url,
+    "/api/v1/secure-item/not-a-number?token=%5BREDACTED%5D&active=true"
   );
 });
 

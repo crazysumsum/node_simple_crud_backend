@@ -9,6 +9,10 @@ export class SystemLogger {
     this.logger = logger;
   }
 
+  isSensitiveField(fieldName) {
+    return this.logger.isSensitiveField(fieldName);
+  }
+
   async log(level, event, message, context = {}) {
     const normalizedLevel = String(level).toLowerCase();
 
