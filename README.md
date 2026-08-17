@@ -569,13 +569,16 @@ Other guarantees:
 static api = {
   method: "GET",
   path: "/api/v1/reports/:id",
-  download: { enabled: true },
+  download: { enabled: true, root: uploadDirectory },
   ...
 };
 
 async execute(req) {
-  const filePath = resolveWithinDirectory(uploadDirectory, req.input.params.id);
-  return this.file({ path: filePath, fileName: "季度報表.pdf", contentType: "application/pdf" });
+  return this.file({
+    path: req.input.params.id,
+    fileName: "季度報表.pdf",
+    contentType: "application/pdf"
+  });
 }
 ```
 
@@ -587,9 +590,10 @@ in-memory content and generated exports all work. The framework sets `Content-Ty
 Calling `this.file()` on a route that has not declared `download.enabled` is a 500,
 not a silent bypass — the JSON envelope stays the default and opting out is explicit.
 
-Whenever a path is derived from request input, pass it through
-`resolveWithinDirectory` from `server/src/framework/http/fileResponse.js`. It resolves
-against the allowed root and rejects anything that escapes it.
+Disk paths must be relative to the route's `download.root`. The framework resolves the
+real root and target, rejects lexical and symlink escapes, and streams from the same
+opened file descriptor it inspected. Absolute paths are never accepted. `buffer` and
+`stream` responses do not use the filesystem and therefore do not require a root.
 
 Request logging skips file bodies automatically in both directions; see
 [Request And Response Bodies](#request-and-response-bodies).

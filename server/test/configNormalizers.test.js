@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import { createHandlerServices } from "../src/framework/api/createHandlerServices.js";
 import { normalizeApplicationConfig } from "../src/framework/configuration/normalizeApplicationConfig.js";
 import { normalizeSecurityConfig } from "../src/framework/security/normalizeSecurityConfig.js";
+import { normalizeDownloadConfig } from "../src/framework/upload/normalizeUploadConfig.js";
 import { normalizeRequestValidationConfig } from "../src/framework/validation/normalizeRequestValidationConfig.js";
 import { normalizeResponseValidationConfig } from "../src/framework/validation/normalizeResponseValidationConfig.js";
 import { normalizeApiVersioningConfig } from "../src/framework/versioning/normalizeApiVersioningConfig.js";
@@ -109,6 +111,28 @@ test("API versioning treats a missing config as a malformed one", () => {
   // 整個區塊漏掉時，第一個檢查就該擋下來，而不是讀到 undefined 再往下爆。
   assert.throws(() => normalizeApiVersioningConfig(undefined), /"defaultVersion"/);
   assert.throws(() => normalizeApiVersioningConfig({}), /"defaultVersion"/);
+});
+
+test("download config keeps root optional for buffers but normalizes a configured root", () => {
+  assert.deepEqual(normalizeDownloadConfig({ enabled: true }), { enabled: true });
+
+  const relative = normalizeDownloadConfig({
+    enabled: true,
+    root: "storage/reports"
+  });
+
+  assert.equal(path.isAbsolute(relative.root), true);
+  assert.match(relative.root, /storage[\\/]reports$/);
+});
+
+test("download config rejects a root that cannot define a directory", () => {
+  for (const root of ["", "   ", 7, false, []]) {
+    assert.throws(
+      () => normalizeDownloadConfig({ enabled: true, root }),
+      /"root" must be a non-empty string/,
+      `${JSON.stringify(root)} 不該被接受`
+    );
+  }
 });
 
 // --- 安全性 --------------------------------------------------------------------

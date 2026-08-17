@@ -7,7 +7,6 @@ import test from "node:test";
 import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
-import { resolveWithinDirectory } from "../src/framework/http/fileResponse.js";
 import { fakeDatabaseOptions } from "../test-support/fakeMySqlPool.js";
 
 // 這一組測試涵蓋的是「上傳／下載成功以外」的路徑：逾時、客戶端中斷、驗證
@@ -91,7 +90,7 @@ function makeHandlers(uploadDirectory) {
       description: "Download a stored report slowly.",
       authType: "public",
       authorizationPolicies: [{ name: "allowAll", options: {} }],
-      download: { enabled: true },
+      download: { enabled: true, root: uploadDirectory },
       // 短到一定會在串流途中觸發。
       timeoutMs: 150,
       requestSchema: {
@@ -106,9 +105,8 @@ function makeHandlers(uploadDirectory) {
     };
 
     async execute(req) {
-      const filePath = resolveWithinDirectory(uploadDirectory, req.input.params.name);
       return this.file({
-        path: filePath,
+        path: req.input.params.name,
         fileName: "report.pdf",
         contentType: "application/pdf"
       });

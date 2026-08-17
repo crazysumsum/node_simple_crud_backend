@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   optionalService,
   systemLoggerFromServices
@@ -177,7 +178,7 @@ export class BaseRequestHandler {
         }
 
         // 檔案回應不套用統一信封，因此也沒有 responseSchema 可驗證。
-        await sendFileResponse(res, result);
+        await sendFileResponse(res, result, { root: req.apiRoute.download.root });
         return result;
       }
 
@@ -279,7 +280,8 @@ export class BaseRequestHandler {
    * 產生中的內容（例如即時產出的 Excel）。框架負責 Content-Type、
    * Content-Disposition 與 Content-Length，handler 不需要、也不允許直接寫回應。
    *
-   * `path` 一律要先經過 resolveWithinDirectory 檢查，避免請求參數決定讀取位置。
+   * `path` 只能是相對於 static api.download.root 的路徑；root 由 route 設定，
+   * handler 不能用絕對路徑改寫框架的檔案邊界。
    */
   file({ path: filePath, buffer, stream, fileName, contentType, statusCode = 200 } = {}) {
     const sources = [filePath, buffer, stream].filter(
@@ -295,6 +297,16 @@ export class BaseRequestHandler {
     if (!fileName) {
       throw new TypeError(
         `Handler "${this.handlerName}" file response requires a fileName`
+      );
+    }
+
+    if (
+      filePath !== undefined &&
+      filePath !== null &&
+      (typeof filePath !== "string" || filePath.length === 0 || path.isAbsolute(filePath))
+    ) {
+      throw new TypeError(
+        `Handler "${this.handlerName}" file response path must be a non-empty relative path`
       );
     }
 
