@@ -270,14 +270,24 @@ export class SchedulerService extends BaseService {
     }, job.timeoutMs);
     timeout?.unref?.();
 
+    let leaseHeld = false;
+
     // running 的佔位必須在這裡、在任何 await 之前完成同步設定。租約取得是一個
     // await：慢的話，排程器可能在它 resolve 之前就已經觸發下一輪 tick，那一輪
     // 一樣會看到 running 是空的，通過上面的重疊檢查，對同一個 job 重複發出
     // acquire()。把租約取得整段搬進這個立即呼叫的 async function 裡，
     // 讓外層在它第一次 await 之前就跑到 running.set()，這個空窗就不存在了。
+    //
+    // 清理（下面的 finally）刻意留在這個 IIFE 之外，包著 await settled 的
+    // 外層 try/finally，而不是這個 IIFE 自己的 finally：job.run() 可能在
+    // 第一次真正的 await 之前就同步拋錯（例如參數解構失敗），這種情況下整個
+    // IIFE 會同步跑完 try/catch，settled 在下面的 running.set() 執行之前就已
+    // 經是個 resolved promise。如果清理放在 IIFE 自己的 finally 裡，
+    // running.delete() 會搶在 running.set() 之前執行，刪掉一筆根本還不存在
+    // 的 key（no-op）；running.set() 隨後把紀錄寫進去，之後再也沒有任何東西
+    // 會刪掉它——這個工作會被永遠當成「還在跑」而跳過。外層 finally 保證只
+    // 會在 await settled 之後執行，那一刻 running.set() 必然已經跑過。
     const settled = (async () => {
-      let leaseHeld = false;
-
       try {
         if (job.scope === "cluster") {
           // 世代編號要在 acquire() 呼叫之前遞增並記住——補償邏輯要能分辨
@@ -434,27 +444,30 @@ export class SchedulerService extends BaseService {
           consecutiveFailures: stats.consecutiveFailures,
           error: { name: error.name, message: error.message }
         });
-      } finally {
-        this.clearTimer(timeout);
-        this.running.delete(job.name);
-
-        if (leaseHeld) {
-          await this.leaseStore
-            .release(job.name, this.owner)
-            .catch((error) =>
-              // 釋放失敗只是讓下一輪等租約自然過期，不算工作失敗，但要看得見。
-              this.logger.error("scheduler.lease.release_failed", "Could not release a cluster job lease", {
-                job: job.name,
-                owner: this.owner,
-                error: { name: error.name, message: error.message }
-              })
-            );
-        }
       }
     })();
 
     this.running.set(job.name, { promise: settled, controller });
-    await settled;
+
+    try {
+      await settled;
+    } finally {
+      this.clearTimer(timeout);
+      this.running.delete(job.name);
+
+      if (leaseHeld) {
+        await this.leaseStore
+          .release(job.name, this.owner)
+          .catch((error) =>
+            // 釋放失敗只是讓下一輪等租約自然過期，不算工作失敗，但要看得見。
+            this.logger.error("scheduler.lease.release_failed", "Could not release a cluster job lease", {
+              job: job.name,
+              owner: this.owner,
+              error: { name: error.name, message: error.message }
+            })
+          );
+      }
+    }
   }
 
   /** 停止排程並等待進行中的工作結束。冪等。 */
