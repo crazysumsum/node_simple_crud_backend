@@ -6,7 +6,7 @@ Node.js + MySQL + Vue 3 development environment.
 
 - Node.js 26+
 - npm 10+
-- MySQL 5.7+ or Docker Desktop
+- MySQL 5.7+
 
 Set `APP_TIME_ZONE` once for the whole application; the default is `Asia/Hong_Kong`.
 All application timestamps, API response metadata, request context, handler events and
@@ -44,21 +44,6 @@ log file dates use this IANA time zone through the injected `time` service.
    - Password: `erp_password`
 
    If your MySQL uses a local socket, run the same SQL without `-h 127.0.0.1 -P 3306` and set `DB_SOCKET_PATH` in `server/.env`.
-
-   Option B, Docker:
-
-   ```bash
-   docker compose up -d mysql adminer
-   ```
-
-   Docker credentials:
-
-   - Host: `127.0.0.1`
-   - Port: `3306`
-   - Database: `erp_dev`
-   - User: `erp_user`
-   - Password: `erp_password`
-   - Adminer: `http://localhost:8080`
 
    Either way, apply the framework's own tables with the application user
    credentials from `server/.env`:
@@ -1191,7 +1176,7 @@ termination signal forces immediate exit.
 
 This project is ready to connect to MySQL, but the database service must be running before `/api/v1/health` reports `database: connected`.
 
-On this Mac, `/usr/local/mysql` exists, but the server did not start successfully during setup. If you want to use that installation, open the MySQL preference pane or inspect `/usr/local/mysql/data/*.err`. A Homebrew MySQL install or Docker Desktop can also be used with the same `.env` keys.
+On this Mac, `/usr/local/mysql` exists, but the server did not start successfully during setup. If you want to use that installation, open the MySQL preference pane or inspect `/usr/local/mysql/data/*.err`. A Homebrew MySQL install can also be used with the same `.env` keys.
 
 ## Project Structure
 
@@ -1205,7 +1190,6 @@ server/scripts/migrate.js   Applies database/framework and database/migrations, 
 server/src/framework/  Reusable API framework capabilities
 server/src/handlers/   Auto-discovered business API handlers
 server/src/services/   Auto-discovered shared application services
-docker-compose.yml     Optional MySQL and Adminer services
 ```
 
 ## Repository Push Verification
