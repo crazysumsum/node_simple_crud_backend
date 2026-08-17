@@ -820,3 +820,117 @@ test("API config rejects route syntax that Express 5 removed", () => {
 
 assert.ok(defaultAuthStrategies.has("public"));
 assert.ok(defaultAuthStrategies.has("jwt"));
+
+test("API config rejects routes that Express would treat as the same path", () => {
+  // Express 的 Router 預設 caseSensitive:false、strict:false，所以只差大小寫或
+  // 結尾斜線的兩條 route 會匹配到同一層：後註冊的那條永遠收不到請求，它宣告的
+  // authType 與 authorizationPolicies 靜靜地失效。用原始字串查重時兩條都會通過。
+  const pair = (first, second) => [
+    {
+      ...apiRouteDefaults,
+      method: "GET",
+      path: first,
+      description: "First route.",
+      authType: "public",
+      handler: "noop",
+      requestSchema: emptyRequestSchema,
+      responseSchema: anySuccessResponseSchema
+    },
+    {
+      ...apiRouteDefaults,
+      method: "GET",
+      path: second,
+      description: "Second route.",
+      // 實際的危害：這條想要 jwt，卻會被上面那條 public 的攔下來。
+      authType: "jwt",
+      handler: "noop",
+      requestSchema: emptyRequestSchema,
+      responseSchema: anySuccessResponseSchema
+    }
+  ];
+  const handlers = { noop: new TestHandler("noop", (req, res) => res.json({})) };
+  const validate = (first, second) =>
+    validateApiConfig(pair(first, second), handlers, defaultAuthStrategies, 1000);
+
+  for (const [first, second] of [
+    ["/api/v1/users", "/api/v1/Users"],
+    ["/api/v1/users", "/api/v1/USERS"],
+    ["/api/v1/items", "/api/v1/items/"],
+    ["/api/v1/items/", "/api/v1/items"]
+  ]) {
+    assert.throws(
+      () => validate(first, second),
+      (error) => {
+        assert.match(error.message, /Duplicate API config/);
+        assert.match(error.message, /never receive a request/);
+        return true;
+      },
+      `expected ${second} to collide with ${first}`
+    );
+  }
+
+  // 真正不同的路徑仍必須通過，否則這個檢查就把正常設定也擋掉了。
+  assert.doesNotThrow(() => validate("/api/v1/users", "/api/v1/user"));
+  assert.doesNotThrow(() => validate("/api/v1/users", "/api/v1/users/active"));
+});
+
+test("an upload budget the instance cannot afford stops startup", async (t) => {
+  // gate × maxRequestBytes 一直是被強制的，但先前沒有任何東西檢查那個乘積是不是
+  // 這台機器負擔得起：設得再大也照樣啟動，然後在負載下被 OOM killer 殺掉——那些
+  // 位元組是 Buffer，落在 V8 堆之外，不會有例外也不會有堆疊。
+  const { FileTypeService } = await import("../src/services/filetype/FileTypeService.js");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const nodePath = await import("node:path");
+
+  const fileTypes = new FileTypeService({ config: {}, services: null, options: {} });
+  const directory = await mkdtemp(nodePath.join(tmpdir(), "upload-budget-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const routes = [
+    {
+      ...apiRouteDefaults,
+      method: "POST",
+      path: "/api/v1/attachments",
+      description: "Upload an attachment.",
+      authType: "public",
+      handler: "noop",
+      requestSchema: emptyRequestSchema,
+      responseSchema: anySuccessResponseSchema,
+      upload: {
+        enabled: true,
+        directory,
+        maxFileSizeBytes: 8388608,
+        maxFiles: 1,
+        allowedMimeTypes: ["image/png"],
+        maxRequestBytes: 10485760
+      }
+    }
+  ];
+  const handlers = { noop: new TestHandler("noop", (req, res) => res.json({})) };
+  const build = (apiUpload) =>
+    createApiDispatcher({
+      routes,
+      handlers,
+      logger: silentLogger,
+      fileTypes,
+      apiUpload
+    });
+
+  // 100 × 10MB = 1000MB，遠超過 256MB 的預算。
+  assert.throws(
+    () =>
+      build({ maxConcurrentUploads: 100, maxUploadMemoryBytes: 268435456 }),
+    (error) => {
+      assert.match(error.message, /exceeds api\.upload\.maxUploadMemoryBytes/);
+      assert.match(error.message, /1048576000/);
+      assert.match(error.message, /outside the V8 heap/);
+      return true;
+    }
+  );
+
+  // 同一份 route 設定，預算配得起就必須啟動——這個檢查不能把正常設定也擋掉。
+  assert.doesNotThrow(() =>
+    build({ maxConcurrentUploads: 10, maxUploadMemoryBytes: 268435456 })
+  );
+});

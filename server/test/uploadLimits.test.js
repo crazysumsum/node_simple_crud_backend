@@ -593,4 +593,75 @@ test("the global upload config defaults and validates its concurrency", () => {
   );
   assert.throws(() => normalizeApiUploadConfig([]), /must be an object/);
   assert.throws(() => normalizeApiUploadConfig(null), /must be an object/);
+
+  // 預算本身：dispatcher 拿它跟乘積比對，值不合法就等於沒有預算可比。
+  assert.equal(normalizeApiUploadConfig({}).maxUploadMemoryBytes, 268435456);
+  assert.equal(
+    normalizeApiUploadConfig({ maxUploadMemoryBytes: 1048576 }).maxUploadMemoryBytes,
+    1048576
+  );
+
+  for (const maxUploadMemoryBytes of [0, -1, 1.5, "lots"]) {
+    assert.throws(
+      () => normalizeApiUploadConfig({ maxUploadMemoryBytes }),
+      /"maxUploadMemoryBytes" must be a positive integer/,
+      `${maxUploadMemoryBytes} 不該被接受`
+    );
+  }
+});
+
+// --- 分塊組裝 ------------------------------------------------------------------
+
+test("a file arriving in many chunks is stored byte-for-byte", async (t) => {
+  // collect() 把分塊累積起來再 concat，然後立刻把分塊放掉，好讓同一份內容不要
+  // 留兩份拷貝。組裝與釋放寫在一起，改錯了就是內容被截斷或錯位——而單塊就送完
+  // 的小檔案完全看不出來，要跨多次 data 事件才顯形。這裡釘住的是組裝結果，
+  // 記憶體那一半沒有辦法在這個測試套件裡穩定觀察。
+  const directory = await uploadDirectory(t);
+  const middleware = createUploadMiddleware({
+    config: uploadConfig(directory, {
+      maxFileSizeBytes: 65536,
+      maxFiles: 1,
+      maxRequestBytes: 131072
+    }),
+    logger: null,
+    fileTypes,
+    gate: new UploadConcurrencyGate({ maxConcurrentUploads: 1 })
+  });
+
+  // 每個位元組都不同，補 0 或錯位都會被抓到。
+  const content = Buffer.concat([
+    PNG_HEAD,
+    Buffer.from(Array.from({ length: 40000 }, (_, i) => i % 251))
+  ]);
+  const body = multipart([content]);
+
+  const req = new PassThrough();
+  req.headers = {
+    "content-type": `multipart/form-data; boundary=${BOUNDARY}`,
+    "content-length": String(body.length)
+  };
+  req.get = (name) => req.headers[String(name).toLowerCase()];
+  req.complete = false;
+
+  const settled = new Promise((resolve) => {
+    middleware(req, { setHeader() {} }, (error) => resolve(error || null));
+  });
+
+  // 小塊餵入，強迫 collect() 走多次 data 事件。
+  for (let offset = 0; offset < body.length; offset += 1024) {
+    req.write(body.subarray(offset, offset + 1024));
+  }
+
+  req.complete = true;
+  req.end();
+
+  assert.equal(await settled, null);
+  assert.equal(req.files.length, 1);
+  assert.equal(req.files[0].size, content.length);
+
+  const { readFile } = await import("node:fs/promises");
+  const stored = await readFile(req.files[0].path);
+  assert.equal(stored.length, content.length, "落盤大小與來源不符");
+  assert.ok(stored.equals(content), "落盤內容與來源不符");
 });

@@ -39,7 +39,20 @@ function collect(stream, limitBytes, onLimit) {
     });
     stream.on("limit", onLimit);
     stream.on("error", reject);
-    stream.on("end", () => resolve({ buffer: Buffer.concat(chunks), size }));
+    stream.on("end", () => {
+      // concat 之後 chunks 仍被上面的 data 監聽器閉包參照著，而閉包活到 stream
+      // 本身被回收為止——於是同一份內容有兩份拷貝並存，一份是要用的 buffer，
+      // 一份是純粹的垃圾。並行上傳時這會讓實際佔用逼近 api.upload_budget 所
+      // 報數字的兩倍。concat 當下的瞬間峰值無法避免（要用它才能做尾端特徵
+      // 校驗），但持續佔用的那一份可以立刻放掉。
+      //
+      // 不傳 totalLength：size 在超限時會把沒收進 chunks 的位元組也算進去
+      // （見上）。那條路徑上的 buffer 一定會被丟掉，所以目前看不出差別，但
+      // 讓長度與內容出自同一個來源，之後改動這裡時少一個要記住的前提。
+      const buffer = Buffer.concat(chunks);
+      chunks.length = 0;
+      resolve({ buffer, size });
+    });
   });
 }
 
