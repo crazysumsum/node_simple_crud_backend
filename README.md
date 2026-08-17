@@ -6,7 +6,7 @@ Node.js + MySQL + Vue 3 development environment.
 
 - Node.js 26+
 - npm 10+
-- MySQL 5.7+ or Docker Desktop
+- MySQL 5.7+
 
 Set `APP_TIME_ZONE` once for the whole application; the default is `Asia/Hong_Kong`.
 All application timestamps, API response metadata, request context, handler events and
@@ -35,23 +35,8 @@ log file dates use this IANA time zone through the injected `time` service.
    mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/init.sql
    ```
 
-   ```bash
-   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/scheduler.sql
-   ```
-
-   ```bash
-   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/jwt.sql
-   ```
-
-   ```bash
-   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/idempotency.sql
-   ```
-
-   `init.sql` must run first: it creates the database and the application user.
-   The files under `database/framework/` create the framework's own tables, which
-   are all named with an `fr_` prefix so that framework-owned tables are never
-   confused with business tables. The server fails to start with a message naming
-   the missing file if one of them was not applied.
+   `init.sql` creates the database and the application user, using root/admin
+   credentials, and only needs to run once.
 
    This creates the `erp_dev` database and an application user:
 
@@ -60,20 +45,20 @@ log file dates use this IANA time zone through the injected `time` service.
 
    If your MySQL uses a local socket, run the same SQL without `-h 127.0.0.1 -P 3306` and set `DB_SOCKET_PATH` in `server/.env`.
 
-   Option B, Docker:
+   Either way, apply the framework's own tables with the application user
+   credentials from `server/.env`:
 
    ```bash
-   docker compose up -d mysql adminer
+   cd server && npm run migrate
    ```
 
-   Docker credentials:
-
-   - Host: `127.0.0.1`
-   - Port: `3306`
-   - Database: `erp_dev`
-   - User: `erp_user`
-   - Password: `erp_password`
-   - Adminer: `http://localhost:8080`
+   This runs the files under `database/framework/` (all tables named with an
+   `fr_` prefix, so framework-owned tables are never confused with business
+   tables) plus any pending files under `database/migrations/`, and records what
+   it already applied in `fr_schema_migrations`. It's safe to run again after a
+   `git pull` — already-applied files are skipped, only new ones run. The server
+   fails to start with a message naming the missing file if a table hasn't been
+   created yet.
 
 4. Start development servers:
 
@@ -1191,7 +1176,7 @@ termination signal forces immediate exit.
 
 This project is ready to connect to MySQL, but the database service must be running before `/api/v1/health` reports `database: connected`.
 
-On this Mac, `/usr/local/mysql` exists, but the server did not start successfully during setup. If you want to use that installation, open the MySQL preference pane or inspect `/usr/local/mysql/data/*.err`. A Homebrew MySQL install or Docker Desktop can also be used with the same `.env` keys.
+On this Mac, `/usr/local/mysql` exists, but the server did not start successfully during setup. If you want to use that installation, open the MySQL preference pane or inspect `/usr/local/mysql/data/*.err`. A Homebrew MySQL install can also be used with the same `.env` keys.
 
 ## Project Structure
 
@@ -1200,10 +1185,11 @@ client/                Vue 3 frontend
 server/                Node.js Express API
 server/database/       MySQL schema and seed data for the business
 server/database/framework/  Framework-owned tables, all prefixed fr_
+server/database/migrations/ Schema deltas applied once by `npm run migrate`
+server/scripts/migrate.js   Applies database/framework and database/migrations, tracked in fr_schema_migrations
 server/src/framework/  Reusable API framework capabilities
 server/src/handlers/   Auto-discovered business API handlers
 server/src/services/   Auto-discovered shared application services
-docker-compose.yml     Optional MySQL and Adminer services
 ```
 
 ## Repository Push Verification
