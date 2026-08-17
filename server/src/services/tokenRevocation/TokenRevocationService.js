@@ -14,7 +14,8 @@ const SQL_FILE = "server/database/framework/jwt.sql";
  * 所以撤銷用「版本號」表示：一個使用者一列，記著一個單調遞增的計數器。token
  * 帶著簽發當下的 ver，比目前版本舊就是已撤銷。整張表小到可以整份載入記憶體
  * （一個使用者一列，不是一個 token 一列），請求路徑只做一次 Map 查詢與一次
- * 數字比較。定時工作負責把快照刷新。
+ * 數字比較。定時工作負責把快照刷新。「小到」由 maxCachedSubjects 強制執行
+ * ——見 load()。
  *
  * 上一版用時間切線（「這個時間點之前簽發的全部作廢」）。換掉它是因為那等於
  * 拿時間當版本號，於是每個毛病都跟時鐘有關：iat 取自簽發節點的時鐘而切線取自
@@ -271,35 +272,59 @@ export class TokenRevocationService extends BaseService {
     let clockRows;
     let rows;
 
+    // maxCachedSubjects 是記憶體上限，不是事後才看的門檻：LIMIT 讓查詢本身
+    // 就不會讀進超過預算的列，所以峰值記憶體是設定的函數，不是這張表大小的
+    // 函數。多要一列（+1）只是用來分辨「剛好等於上限」與「超過上限」，那一列
+    // 永遠不會被放進快照。
+    const budget = this.revocationConfig.maxCachedSubjects;
+
     try {
       // 兩次查詢而不是一次 JOIN：時鐘與名單是兩件無關的事，湊在一句 SQL 裡只會
       // 讓「表不見了」與「時鐘讀不到」在錯誤訊息上分不開。刷新間隔是 30 秒，
       // 多一次 SELECT UNIX_TIMESTAMP() 的成本可以忽略。
       [clockRows] = await this.database.query("SELECT UNIX_TIMESTAMP() AS db_now");
-      [rows] = await this.database.query(`SELECT subject, version FROM ${TABLE}`);
+      // LIMIT 不能用佔位符：MySQL 的 binary protocol 會以 ER_WRONG_ARGUMENTS
+      // 拒絕 `LIMIT ?`（見 MySqlIdempotencyStore.purge()）。這裡內插的是通過
+      // normalizeTokenRevocationConfig 驗證過的正整數設定值，不是外部輸入，
+      // 沒有注入面。
+      [rows] = await this.database.query(
+        `SELECT subject, version FROM ${TABLE} LIMIT ${budget + 1}`
+      );
     } catch (error) {
       throw describeMissingTable(error, { table: TABLE, sqlFile: SQL_FILE });
     }
 
+    // 排在溢位檢查之前：溢位是一場會持續一陣子的故障，時鐘監控不該跟著停掉。
     await this.#reportClockSkew(Number(clockRows[0].db_now));
+
+    if (rows.length > budget) {
+      // 截斷的快照比沒有快照更糟：落在 LIMIT 界外的 subject 會靜默地免疫於
+      // 撤銷，而呼叫端看不出這份快照是殘的——那正是這整個模組要防的無聲失效。
+      //
+      // 所以溢位算一次載入失敗，交給既有的階梯處理：initialize() 時是啟動
+      // 失敗；refresh() 時舊快照原封不動、記 refresh_failed、排程器記一次
+      // 失敗工作，撐過 maxFailOpenSeconds 之後由 snapshotUsable() 熔斷成 jwt
+      // route 的 503。
+      await this.logger.error(
+        "auth.revocation.snapshot_oversized",
+        "Token revocation snapshot exceeded the configured subject limit; refusing to load a truncated one",
+        {
+          maxCachedSubjects: budget,
+          snapshotAgeSeconds: this.snapshotAgeSeconds()
+        }
+      );
+      throw new Error(
+        `Token revocation snapshot exceeds maxCachedSubjects (${budget}). Loading it fully ` +
+          "would risk exhausting the heap, and a truncated snapshot would silently exempt " +
+          "the subjects it omits. Raise tokenRevocation.maxCachedSubjects after checking the " +
+          `process has headroom for it, or find out why ${TABLE} grew this large.`
+      );
+    }
 
     const snapshot = new Map();
 
     for (const row of rows) {
       snapshot.set(String(row.subject), Number(row.version));
-    }
-
-    if (snapshot.size > this.revocationConfig.maxCachedSubjects) {
-      // 繼續載入而不是拒絕：撤銷名單異常增長是要看見的訊號，但把它變成啟動
-      // 失敗，等於讓一個監控問題升級成服務中斷。
-      await this.logger.warn(
-        "auth.revocation.snapshot_oversized",
-        "Token revocation snapshot exceeded the configured subject limit",
-        {
-          cachedSubjects: snapshot.size,
-          maxCachedSubjects: this.revocationConfig.maxCachedSubjects
-        }
-      );
     }
 
     this.snapshot = snapshot;
