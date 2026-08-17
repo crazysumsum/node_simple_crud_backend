@@ -2,8 +2,10 @@
 --
 -- fr_ 前綴代表這張表由框架擁有：它的結構隨框架版本演進，業務端不應該寫入它。
 -- 沒有前綴的表（例如 users）是業務資料，框架不會碰。
-
-USE erp_dev;
+--
+-- 不寫 USE：這個檔案永遠透過已經連到 DB_NAME 指定資料庫的連線執行
+-- （scripts/migrate.js 或 docker-entrypoint-initdb.d 的 --database），寫死
+-- 資料庫名稱只會在改了 DB_NAME 的環境裡把表建到錯的地方。
 
 -- scope: "cluster" 的背景工作用這張表確保同一輪只有一個實例執行。
 -- expires_at 為 0 代表目前沒有人持有；持有者崩潰時租約會自然過期，

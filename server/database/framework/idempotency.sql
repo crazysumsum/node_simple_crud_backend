@@ -2,8 +2,10 @@
 --
 -- fr_ 前綴代表這張表由框架擁有：它的結構隨框架版本演進，業務端不應該寫入它。
 -- 沒有前綴的表（例如 users）是業務資料，框架不會碰。
-
-USE erp_dev;
+--
+-- 不寫 USE：這個檔案永遠透過已經連到 DB_NAME 指定資料庫的連線執行
+-- （scripts/migrate.js 或 docker-entrypoint-initdb.d 的 --database），寫死
+-- 資料庫名稱只會在改了 DB_NAME 的環境裡把表建到錯的地方。
 
 -- 共享的 idempotency 紀錄。主鍵就是互斥鎖：INSERT 成功代表搶到這個 key，
 -- 主鍵衝突代表別的實例先到，所以多實例部署下同一個 key 只會執行一次。
@@ -40,5 +42,7 @@ CREATE TABLE IF NOT EXISTS fr_idempotency_keys (
 
 -- 既有部署：這張表原本沒有 lease_owner。DEFAULT '' 讓既有列在 ALTER 之後仍然
 -- 合法，但那些列此刻沒有真正的持有者——下一次晚到的寫入仍然可能命中它們，
--- 直到它們自然過期或被下一輪 begin() 換上新的 owner 為止。手動執行：
---   ALTER TABLE fr_idempotency_keys ADD COLUMN lease_owner CHAR(32) NOT NULL DEFAULT '' AFTER state;
+-- 直到它們自然過期或被下一輪 begin() 換上新的 owner 為止。
+--
+-- 既有部署的補欄由 database/migrations/0001_add_idempotency_lease_owner.js
+-- 自動處理（`npm run migrate` 時執行一次），不再需要手動下 ALTER TABLE。

@@ -35,23 +35,8 @@ log file dates use this IANA time zone through the injected `time` service.
    mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/init.sql
    ```
 
-   ```bash
-   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/scheduler.sql
-   ```
-
-   ```bash
-   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/jwt.sql
-   ```
-
-   ```bash
-   mysql -h 127.0.0.1 -P 3306 -u root -p < server/database/framework/idempotency.sql
-   ```
-
-   `init.sql` must run first: it creates the database and the application user.
-   The files under `database/framework/` create the framework's own tables, which
-   are all named with an `fr_` prefix so that framework-owned tables are never
-   confused with business tables. The server fails to start with a message naming
-   the missing file if one of them was not applied.
+   `init.sql` creates the database and the application user, using root/admin
+   credentials, and only needs to run once.
 
    This creates the `erp_dev` database and an application user:
 
@@ -74,6 +59,21 @@ log file dates use this IANA time zone through the injected `time` service.
    - User: `erp_user`
    - Password: `erp_password`
    - Adminer: `http://localhost:8080`
+
+   Either way, apply the framework's own tables with the application user
+   credentials from `server/.env`:
+
+   ```bash
+   cd server && npm run migrate
+   ```
+
+   This runs the files under `database/framework/` (all tables named with an
+   `fr_` prefix, so framework-owned tables are never confused with business
+   tables) plus any pending files under `database/migrations/`, and records what
+   it already applied in `fr_schema_migrations`. It's safe to run again after a
+   `git pull` — already-applied files are skipped, only new ones run. The server
+   fails to start with a message naming the missing file if a table hasn't been
+   created yet.
 
 4. Start development servers:
 
@@ -1200,6 +1200,8 @@ client/                Vue 3 frontend
 server/                Node.js Express API
 server/database/       MySQL schema and seed data for the business
 server/database/framework/  Framework-owned tables, all prefixed fr_
+server/database/migrations/ Schema deltas applied once by `npm run migrate`
+server/scripts/migrate.js   Applies database/framework and database/migrations, tracked in fr_schema_migrations
 server/src/framework/  Reusable API framework capabilities
 server/src/handlers/   Auto-discovered business API handlers
 server/src/services/   Auto-discovered shared application services
