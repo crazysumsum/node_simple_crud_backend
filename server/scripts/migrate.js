@@ -12,9 +12,16 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import databaseConfig from "../config/database.js";
+import dotenv from "dotenv";
 import { normalizeDatabaseConfig } from "../src/framework/configuration/normalizeDatabaseConfig.js";
 import { createMySqlDatabasePool } from "../src/services/mysqldatabase/connection.js";
+
+// config/database.js 在載入當下就讀 process.env.DB_*，所以必須先呼叫
+// dotenv.config()，再用動態 import 載入它——靜態 import 會在檔案最上面就
+// 求值，那時 dotenv 還沒機會把 server/.env 寫進 process.env。順序跟
+// src/index.js 一致。
+dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)) });
+const { default: databaseConfig } = await import("../config/database.js");
 
 const databaseDirectory = fileURLToPath(new URL("../database/", import.meta.url));
 
