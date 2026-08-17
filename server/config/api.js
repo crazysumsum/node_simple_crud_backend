@@ -93,8 +93,10 @@ const apiConfig = {
       directoryMode: 0o700
     },
 
-    // 檔案下載。啟用後該 route 的 handler 可以回傳 this.file(...)，
-    // 回應不套用統一 JSON 信封，也不執行 responseSchema 驗證。
+    // 檔案下載。啟用後該 route 的 handler 可以回傳 this.file(...)，回應不套用
+    // 統一 JSON 信封，也不執行 responseSchema 驗證。磁碟 path response 必須在
+    // route 另設 root，且 handler 只能回傳相對於該 root 的路徑；buffer／stream
+    // response 不需要 root。
     download: {
       enabled: false
     },

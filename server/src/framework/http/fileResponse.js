@@ -1,5 +1,5 @@
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { ApplicationError } from "../errors/ApplicationError.js";
@@ -20,27 +20,88 @@ function contentDisposition(fileName) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
 }
 
-/**
- * 確認目標檔案位於允許的目錄內。直接把 handler 算出來的路徑交給 sendFile，
- * 只要那個路徑有一部分來自請求參數，就是路徑穿越漏洞。
- */
-export function resolveWithinDirectory(directory, target) {
+function isWithinDirectory(directory, target) {
+  return target === directory || target.startsWith(directory + path.sep);
+}
+
+function outsideRootError() {
+  return new ApplicationError("Resolved file path escapes its directory", {
+    code: "FILE_PATH_OUTSIDE_ROOT",
+    statusCode: 400,
+    publicCode: "NOT_FOUND",
+    publicMessage: "Not found"
+  });
+}
+
+function fileNotFoundError(filePath, cause) {
+  return new ApplicationError(`Download target is not a file: ${filePath}`, {
+    code: "FILE_NOT_FOUND",
+    statusCode: 404,
+    publicCode: "NOT_FOUND",
+    publicMessage: "Not found",
+    cause
+  });
+}
+
+async function openFileWithinDirectory(directory, target) {
   const root = path.resolve(directory);
   const resolved = path.resolve(root, target);
 
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-    throw new ApplicationError("Resolved file path escapes its directory", {
-      code: "FILE_PATH_OUTSIDE_ROOT",
-      statusCode: 400,
-      publicCode: "NOT_FOUND",
-      publicMessage: "Not found"
+  if (!isWithinDirectory(root, resolved)) {
+    throw outsideRootError();
+  }
+
+  let realRoot;
+
+  try {
+    realRoot = await realpath(root);
+  } catch (cause) {
+    throw new ApplicationError(`Download root is unavailable: ${root}`, {
+      code: "DOWNLOAD_ROOT_UNAVAILABLE",
+      statusCode: 500,
+      publicCode: "INTERNAL_SERVER_ERROR",
+      publicMessage: "Internal server error",
+      cause
     });
   }
 
-  return resolved;
+  let realTarget;
+
+  try {
+    realTarget = await realpath(resolved);
+  } catch (cause) {
+    throw fileNotFoundError(target, cause);
+  }
+
+  if (!isWithinDirectory(realRoot, realTarget)) {
+    throw outsideRootError();
+  }
+
+  let handle;
+
+  try {
+    // realpath containment 擋下既存的 symlink escape；O_NOFOLLOW 再擋住
+    // realpath 與 open 之間被換成 symlink 的最後一個 path component。
+    handle = await open(realTarget, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stats = await handle.stat();
+
+    if (!stats.isFile()) {
+      throw fileNotFoundError(target);
+    }
+
+    return { handle, stats };
+  } catch (cause) {
+    await handle?.close();
+
+    if (cause instanceof ApplicationError) {
+      throw cause;
+    }
+
+    throw fileNotFoundError(target, cause);
+  }
 }
 
-export async function sendFileResponse(res, descriptor) {
+export async function sendFileResponse(res, descriptor, { root } = {}) {
   const { path: filePath, buffer, stream, fileName, contentType, statusCode = 200 } = descriptor;
 
   res.status(statusCode);
@@ -56,19 +117,25 @@ export async function sendFileResponse(res, descriptor) {
   }
 
   if (filePath) {
-    const stats = await stat(filePath).catch(() => null);
-
-    if (!stats?.isFile()) {
-      throw new ApplicationError(`Download target is not a file: ${filePath}`, {
-        code: "FILE_NOT_FOUND",
-        statusCode: 404,
-        publicCode: "NOT_FOUND",
-        publicMessage: "Not found"
+    if (!root) {
+      throw new ApplicationError("File response requires a configured download root", {
+        code: "HANDLER_DOWNLOAD_ROOT_REQUIRED",
+        statusCode: 500,
+        publicCode: "INTERNAL_SERVER_ERROR",
+        publicMessage: "Internal server error"
       });
     }
 
-    res.setHeader("Content-Length", String(stats.size));
-    await pipeline(createReadStream(filePath), res);
+    const { handle, stats } = await openFileWithinDirectory(root, filePath);
+
+    try {
+      res.setHeader("Content-Length", String(stats.size));
+      // fstat 與串流共用同一個 descriptor，pathname 不會在兩者之間被替換。
+      await pipeline(handle.createReadStream({ autoClose: false }), res);
+    } finally {
+      await handle.close();
+    }
+
     return;
   }
 

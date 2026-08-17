@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
-import { readdir, readFile, rm, mkdtemp } from "node:fs/promises";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { BaseRequestHandler } from "../src/framework/api/BaseRequestHandler.js";
 import { createApplication } from "../src/framework/application/createApplication.js";
 import { defaultConfigurationSource } from "../src/framework/configuration/applicationConfiguration.js";
-import { resolveWithinDirectory } from "../src/framework/http/fileResponse.js";
 import { fakeDatabaseOptions } from "../test-support/fakeMySqlPool.js";
 
 // 真實的檔案位元組。內容校驗必須靠簽章，所以測試不能用假資料。
@@ -75,7 +81,7 @@ function makeHandlers(uploadDirectory) {
       description: "Download a stored report.",
       authType: "public",
       authorizationPolicies: [{ name: "allowAll", options: {} }],
-      download: { enabled: true },
+      download: { enabled: true, root: uploadDirectory },
       requestSchema: {
         params: {
           type: "object",
@@ -88,10 +94,8 @@ function makeHandlers(uploadDirectory) {
     };
 
     async execute(req) {
-      // 路徑一定要收斂回允許的目錄，name 來自請求。
-      const filePath = resolveWithinDirectory(uploadDirectory, req.input.params.name);
       return this.file({
-        path: filePath,
+        path: req.input.params.name,
         fileName: "季度報表.pdf",
         contentType: "application/pdf"
       });
@@ -104,6 +108,8 @@ function makeHandlers(uploadDirectory) {
       ...DownloadHandler.api,
       path: "/api/v1/exports",
       description: "Download generated content.",
+      // buffer／stream 沒有磁碟 pathname，因此不需要 download.root。
+      download: { enabled: true },
       requestSchema: {
         query: { type: "object", additionalProperties: false, properties: {} }
       }
@@ -113,6 +119,27 @@ function makeHandlers(uploadDirectory) {
       return this.file({
         buffer: PDF,
         fileName: "generated.pdf",
+        contentType: "application/pdf"
+      });
+    }
+  }
+
+  class RootlessPathDownloadHandler extends BaseRequestHandler {
+    static handlerName = "downloadWithoutRoot";
+    static api = {
+      ...DownloadHandler.api,
+      path: "/api/v1/rootless",
+      description: "Attempt a disk download without a configured root.",
+      download: { enabled: true },
+      requestSchema: {
+        query: { type: "object", additionalProperties: false, properties: {} }
+      }
+    };
+
+    async execute() {
+      return this.file({
+        path: "report.pdf",
+        fileName: "report.pdf",
         contentType: "application/pdf"
       });
     }
@@ -132,7 +159,13 @@ function makeHandlers(uploadDirectory) {
     }
   }
 
-  return { UploadHandler, DownloadHandler, BufferDownloadHandler, UndeclaredDownloadHandler };
+  return {
+    UploadHandler,
+    DownloadHandler,
+    BufferDownloadHandler,
+    RootlessPathDownloadHandler,
+    UndeclaredDownloadHandler
+  };
 }
 
 async function startApplication(t) {
@@ -360,11 +393,44 @@ test("download serves generated content from a buffer", async (t) => {
 test("download rejects a path that escapes the storage directory", async (t) => {
   const { url } = await startApplication(t);
 
-  // 編碼過的穿越路徑會還原成 params，必須由 resolveWithinDirectory 擋下。
+  // 編碼過的穿越路徑會還原成 params，必須由 route 的 download.root 擋下。
   const response = await fetch(`${url}/api/v1/reports/${encodeURIComponent("../../../etc/passwd")}`);
 
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error.code, "NOT_FOUND");
+});
+
+test("download rejects a symlink inside its root that points outside", async (t) => {
+  const { url, uploadDirectory } = await startApplication(t);
+  const outsideDirectory = await mkdtemp(path.join(os.tmpdir(), "erp-download-outside-"));
+  t.after(() => rm(outsideDirectory, { recursive: true, force: true }));
+  const outsideFile = path.join(outsideDirectory, "secret.pdf");
+
+  await writeFile(outsideFile, PDF);
+  await symlink(outsideFile, path.join(uploadDirectory, "inside-link.pdf"));
+
+  const response = await fetch(`${url}/api/v1/reports/inside-link.pdf`);
+
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, "NOT_FOUND");
+});
+
+test("file responses reject absolute paths before they reach the filesystem", () => {
+  const handler = new BaseRequestHandler("absolutePathDownload", {});
+
+  assert.throws(
+    () => handler.file({ path: path.resolve("report.pdf"), fileName: "report.pdf" }),
+    /path must be a non-empty relative path/
+  );
+});
+
+test("disk file responses require a route-level download root", async (t) => {
+  const { url } = await startApplication(t);
+
+  const response = await fetch(`${url}/api/v1/rootless`);
+
+  assert.equal(response.status, 500);
+  assert.equal((await response.json()).error.code, "INTERNAL_SERVER_ERROR");
 });
 
 test("download returns 404 for a missing file", async (t) => {

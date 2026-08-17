@@ -190,5 +190,18 @@ export function normalizeDownloadConfig(
     throw new Error(`${label} must be an object`);
   }
 
-  return Object.freeze({ enabled: source.enabled === true });
+  const normalized = { enabled: source.enabled === true };
+
+  if (source.root === undefined || source.root === null) {
+    return Object.freeze(normalized);
+  }
+
+  if (typeof source.root !== "string" || !source.root.trim()) {
+    throw new Error(`${label} "root" must be a non-empty string`);
+  }
+
+  const root = source.root.trim();
+  normalized.root = path.isAbsolute(root) ? root : path.resolve(serverRoot, root);
+
+  return Object.freeze(normalized);
 }
