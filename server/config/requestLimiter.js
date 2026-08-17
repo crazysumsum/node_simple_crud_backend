@@ -90,7 +90,27 @@ const requestLimiterConfig = {
   // 一個永不返回的 handler 是 bug，達到這個數代表那個 bug 是系統性的。被負載
   // 平衡摘出輪替，好過安靜地一路洩漏下去。每一筆都會記一則 error 級別的
   // request.handler_leaked，帶著是哪一條 route。
-  maxAbandonedRequests: 100
+  maxAbandonedRequests: 100,
+
+  // store.consume() 最多容許跑多久。這是限流器裡唯一一段外部依賴的 await——
+  // 框架內建的 memory store 不會卡住，但注入的共享 adapter（例如 Redis）可能
+  // 在連線池耗盡或網路分區時永遠不 resolve。少了這個上限，這段 await 完全不
+  // 受任何既有機制保護：它比 bodyReceiveTimeout 和 route 的 timeoutMs 都還要
+  // 早，兩者都要等它 next() 之後才會啟動；activeRequests/queue 也不會計數，
+  // 因為兩者都是 consume() resolve 之後才更動。逾時後會記一筆 error 級別的
+  // request.limit.store_timeout。
+  storeOperationTimeoutMs: 500,
+
+  // store.consume() 逾時之後怎麼處理這個請求。
+  //
+  // "closed"：回 503，跟 store 真的丟出錯誤時的效果一致——store 是限流器的
+  // 依賴，它不可靠時保守地拒絕新請求。
+  // "open"：放行這個請求的 IP 配額檢查，並行/佇列這兩層與 store 無關，照舊
+  // 生效——store 的問題不該連帶波及跟它無關的保護。
+  //
+  // 兩者的安全含義相反，這裡明確寫出來，不依賴 normalizeRequestLimiterConfig
+  // 裡的預設值。
+  storeFailureMode: "closed"
 };
 
 export default requestLimiterConfig;
