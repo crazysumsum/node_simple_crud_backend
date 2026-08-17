@@ -35,3 +35,6 @@ jobs:
 
       - name: Run backend tests with coverage thresholds
         run: npm run test:coverage
+
+      - name: Build frontend
+        run: npm run build --workspace client
