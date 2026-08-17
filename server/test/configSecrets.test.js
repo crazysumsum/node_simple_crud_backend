@@ -122,6 +122,7 @@ test("the connection pool receives a plain password, not the wrapper", () => {
     queueLimit: 200,
     acquireTimeoutMs: 5000,
     queryTimeoutMs: 1000,
+    abandonedConnectionAction: "release",
     transactionTimeoutMs: 1000
   });
   const options = mySqlPoolOptions(database);
@@ -129,13 +130,48 @@ test("the connection pool receives a plain password, not the wrapper", () => {
   // mysql2 需要字串；傳進包裝物件會在建立連線時才爆，症狀是啟動連不上資料庫。
   assert.equal(options.password, "db-password");
   assert.equal(options.user, "erp_user");
-  // 逾時設定是框架自己的，不屬於連線池。
+  // 這四個是框架自己讀的設定，不是 mysql2 認得的連線池選項；留著會在建立
+  // 連線池時被當成無效選項印警告（未來版本的 mysql2 會直接丟例外）。
   assert.equal(Object.hasOwn(options, "queryTimeoutMs"), false);
   assert.equal(Object.hasOwn(options, "transactionTimeoutMs"), false);
+  assert.equal(Object.hasOwn(options, "acquireTimeoutMs"), false);
+  assert.equal(Object.hasOwn(options, "abandonedConnectionAction"), false);
 
   // 尚未正規化的設定檔（預設參數走的那條路）也要能處理。
   assert.equal(mySqlPoolOptions({ password: "raw" }).password, "raw");
   assert.equal(mySqlPoolOptions({}).password, "");
+});
+
+test("mySqlPoolOptions passes mysql2 exactly the keys it understands, nothing more", () => {
+  // 逐一斷言少了什麼，之後每加一個框架自用欄位都要記得同步加一行斷言，
+  // 很容易漏。這裡改成整個物件精確比對：往後只要有新欄位沒被排除，物件
+  // 形狀就會不一樣，測試會直接炸開，不需要每次手動補斷言。
+  const database = normalizeDatabaseConfig({
+    host: "127.0.0.1",
+    port: 3306,
+    user: "erp_user",
+    password: "db-password",
+    database: "erp",
+    connectionLimit: 10,
+    queueLimit: 200,
+    acquireTimeoutMs: 5000,
+    queryTimeoutMs: 1000,
+    abandonedConnectionAction: "release",
+    transactionTimeoutMs: 1000
+  });
+
+  assert.deepEqual(mySqlPoolOptions(database), {
+    host: "127.0.0.1",
+    port: 3306,
+    user: "erp_user",
+    password: "db-password",
+    database: "erp",
+    socketPath: undefined,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 200,
+    ssl: undefined
+  });
 });
 
 test("every logger profile redacts the same sensitive field names", async () => {
