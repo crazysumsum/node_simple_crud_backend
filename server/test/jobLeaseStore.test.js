@@ -201,6 +201,22 @@ test("a sub-second lease still reserves at least one second", async () => {
   assert.equal(database.rows.get("a.job").expires_at, 1001);
 });
 
+test("acquire threads the caller's signal into the transaction so it can be cancelled", async () => {
+  const database = fakeDatabase({ now: 1000 });
+  const store = new MySqlJobLeaseStore({ database });
+  await store.prepare(["a.job"]);
+
+  const controller = new AbortController();
+  await store.acquire("a.job", { owner: "A", leaseMs: 30_000, signal: controller.signal });
+
+  const transactionCall = database.log.find((entry) => "transaction" in entry);
+  assert.equal(
+    transactionCall.transaction.signal,
+    controller.signal,
+    "逾時時排程器要能中斷還在飛的交易，而不是讓它跑到底才發現沒人在等"
+  );
+});
+
 test("a transaction failure propagates so the scheduler can report it", async () => {
   const database = fakeDatabase({
     onTransaction: () => {

@@ -376,6 +376,142 @@ test("a lease acquisition that exceeds the job timeout is aborted and reported, 
   await scheduler.stop();
 });
 
+test("a lease that finally succeeds after its acquisition already timed out is released, not left held", async () => {
+  let resolveAcquire;
+  const acquireCalls = [];
+  const releaseCalls = [];
+  const leaseStore = {
+    async prepare() {},
+    acquire(jobName, options) {
+      acquireCalls.push({ jobName, owner: options.owner });
+      return new Promise((resolve) => {
+        resolveAcquire = resolve;
+      });
+    },
+    async release(jobName, owner) {
+      releaseCalls.push({ jobName, owner });
+    }
+  };
+  const service = jobService([
+    { name: "demo.cluster", method: "work", intervalMs: 10_000, timeoutMs: 500, scope: "cluster" }
+  ]);
+  const { scheduler, timers, logger } = createScheduler({
+    jobs: { demo: service },
+    leaseStore,
+    random: () => 0
+  });
+
+  await scheduler.start();
+  await timers.advance(8000);
+  assert.equal(acquireCalls.length, 1);
+  await timers.advance(500);
+
+  const stats = scheduler.stats.get("demo.cluster");
+  assert.equal(stats.lastOutcome, "leaseTimedOut", "逾時當下這一輪應該先被記成失敗");
+  assert.equal(releaseCalls.length, 0, "還沒真的拿到租約，這時不該有釋放");
+
+  // 資料庫這時才終於回來，acquire() 遲來地成功——這正是幽靈鎖的成因：
+  // 沒有人在等這個結果，租約會一直留著直到自然過期。
+  resolveAcquire(true);
+  await timers.advance(0);
+
+  assert.deepEqual(releaseCalls, [{ jobName: "demo.cluster", owner: scheduler.owner }],
+    "遲來的成功必須觸發補償性釋放");
+  const entry = logger.entries.find((c) => c.event === "scheduler.lease.late_release");
+  assert.ok(entry, "補償性釋放必須留下記錄");
+  assert.equal(entry.context.job, "demo.cluster");
+
+  // 工作本身從頭到尾都沒有執行，逾時當下記下的結果也不該被這次補償覆蓋。
+  assert.equal(service.calls.length, 0);
+  assert.equal(stats.lastOutcome, "leaseTimedOut");
+
+  await scheduler.stop();
+});
+
+test("a compensating release that itself fails is reported, not swallowed silently", async () => {
+  let resolveAcquire;
+  const leaseStore = {
+    async prepare() {},
+    acquire() {
+      return new Promise((resolve) => {
+        resolveAcquire = resolve;
+      });
+    },
+    async release() {
+      throw new Error("database is unreachable");
+    }
+  };
+  const service = jobService([
+    { name: "demo.cluster", method: "work", intervalMs: 10_000, timeoutMs: 500, scope: "cluster" }
+  ]);
+  const { scheduler, timers, logger } = createScheduler({
+    jobs: { demo: service },
+    leaseStore,
+    random: () => 0
+  });
+
+  await scheduler.start();
+  await timers.advance(8000);
+  await timers.advance(500);
+
+  resolveAcquire(true);
+  await timers.advance(0);
+
+  const entry = logger.entries.find((c) => c.event === "scheduler.lease.late_release_failed");
+  assert.ok(entry, "補償性釋放本身失敗時必須留下記錄，不能悄悄吞掉");
+  assert.equal(entry.context.job, "demo.cluster");
+  assert.equal(entry.context.error.message, "database is unreachable");
+
+  await scheduler.stop();
+});
+
+test("a late lease success from a stale attempt does not release a lease a newer attempt already holds", async () => {
+  const acquireResolvers = [];
+  const releaseCalls = [];
+  const leaseStore = {
+    async prepare() {},
+    acquire() {
+      return new Promise((resolve) => {
+        acquireResolvers.push(resolve);
+      });
+    },
+    async release(jobName, owner) {
+      releaseCalls.push({ jobName, owner });
+    }
+  };
+  const service = jobService([
+    { name: "demo.cluster", method: "work", intervalMs: 1000, timeoutMs: 200, scope: "cluster" }
+  ]);
+  const { scheduler, timers } = createScheduler({
+    jobs: { demo: service },
+    leaseStore,
+    random: () => 0
+  });
+
+  await scheduler.start();
+  await timers.advance(800);
+  assert.equal(acquireResolvers.length, 1, "第一次嘗試發出 acquire()");
+  await timers.advance(200);
+  assert.equal(scheduler.stats.get("demo.cluster").lastOutcome, "leaseTimedOut");
+
+  // running 佔位在逾時當下就被清掉了，下一輪 tick 可以立刻發出新的嘗試。
+  await timers.advance(800);
+  assert.equal(acquireResolvers.length, 2, "第二次嘗試應該發出新的 acquire()");
+
+  acquireResolvers[1](true);
+  await timers.advance(0);
+  assert.equal(service.calls.length, 1, "第二次嘗試應該正常執行工作");
+  assert.equal(releaseCalls.length, 1, "工作結束後應該正常釋放");
+
+  // 第一次嘗試現在才遲來地成功。此時第二次嘗試已經合法拿到並釋放過租約，
+  // 世代編號已經不是第一次嘗試的了——補償邏輯必須認得出來，不能再釋放一次。
+  acquireResolvers[0](true);
+  await timers.advance(0);
+  assert.equal(releaseCalls.length, 1, "過期嘗試的遲來成功不該再觸發釋放");
+
+  await scheduler.stop();
+});
+
 test("instance-scoped jobs never touch the lease store", async () => {
   const service = jobService([
     { name: "demo.local", method: "work", intervalMs: 1000, timeoutMs: 200 }

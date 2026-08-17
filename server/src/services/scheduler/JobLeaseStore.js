@@ -10,6 +10,10 @@ import { describeMissingTable } from "../mysqldatabase/missingTableError.js";
 export class JobLeaseStore {
   /**
    * 必須是原子操作：同一個 jobName 同時被多個實例呼叫時，只有一個能得到 true。
+   *
+   * options 可以帶一個 signal：呼叫端的等待逾時後會 abort 它，實作應該盡力
+   * 中斷還在進行中的取得動作，而不是讓它繼續跑到底——逾時之後沒有人會再
+   * await 這個 promise，跑到底而且成功的話，租約會沒有人釋放。
    * @returns {Promise<boolean>} 是否取得租約
    */
   async acquire(_jobName, _options) {
@@ -67,34 +71,39 @@ export class MySqlJobLeaseStore extends JobLeaseStore {
     }
   }
 
-  async acquire(jobName, { owner, leaseMs }) {
+  async acquire(jobName, { owner, leaseMs, signal }) {
     const leaseSeconds = Math.max(1, Math.ceil(leaseMs / 1000));
 
-    return this.database.withTransaction(async (transaction) => {
-      const [clock] = await transaction.query("SELECT UNIX_TIMESTAMP() AS now");
-      const now = Number(clock[0].now);
-      const [rows] = await transaction.query(
-        "SELECT owner, expires_at FROM fr_job_leases WHERE job_name = ? FOR UPDATE",
-        [jobName]
-      );
-      const existing = rows[0];
+    return this.database.withTransaction(
+      async (transaction) => {
+        const [clock] = await transaction.query("SELECT UNIX_TIMESTAMP() AS now");
+        const now = Number(clock[0].now);
+        const [rows] = await transaction.query(
+          "SELECT owner, expires_at FROM fr_job_leases WHERE job_name = ? FOR UPDATE",
+          [jobName]
+        );
+        const existing = rows[0];
 
-      // prepare() 應該已經建好列。沒有列代表有人手動刪了表內容，此時讓這一輪
-      // 跳過並在下次 prepare 補回，比在這裡默默插入安全。
-      if (!existing) {
-        return false;
-      }
+        // prepare() 應該已經建好列。沒有列代表有人手動刪了表內容，此時讓這一輪
+        // 跳過並在下次 prepare 補回，比在這裡默默插入安全。
+        if (!existing) {
+          return false;
+        }
 
-      if (Number(existing.expires_at) > now && existing.owner !== owner) {
-        return false;
-      }
+        if (Number(existing.expires_at) > now && existing.owner !== owner) {
+          return false;
+        }
 
-      await transaction.execute(
-        "UPDATE fr_job_leases SET owner = ?, acquired_at = ?, expires_at = ? WHERE job_name = ?",
-        [owner, now, now + leaseSeconds, jobName]
-      );
-      return true;
-    });
+        await transaction.execute(
+          "UPDATE fr_job_leases SET owner = ?, acquired_at = ?, expires_at = ? WHERE job_name = ?",
+          [owner, now, now + leaseSeconds, jobName]
+        );
+        return true;
+      },
+      // signal 讓呼叫端（排程器）能在自己的逾時發生時中斷這筆交易，而不是讓
+      // 它跑到底才發現已經沒有人在等結果了。
+      { signal }
+    );
   }
 
   async release(jobName, owner) {

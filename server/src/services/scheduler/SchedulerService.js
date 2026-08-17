@@ -69,6 +69,10 @@ export class SchedulerService extends BaseService {
     this.timers = new Map();
     this.running = new Map();
     this.stats = new Map();
+    // 每次替一個 cluster job 開新的 acquire 嘗試就遞增。逾時之後遲到的
+    // acquirePromise 補償釋放前要核對這個世代，否則會釋放掉同一個 owner
+    // 後續嘗試剛拿到的租約，見 runJob() 裡的補償邏輯。
+    this.leaseAttempt = new Map();
     this.started = false;
     this.stopped = false;
   }
@@ -276,9 +280,18 @@ export class SchedulerService extends BaseService {
 
       try {
         if (job.scope === "cluster") {
+          // 世代編號要在 acquire() 呼叫之前遞增並記住——補償邏輯要能分辨
+          // 「這次逾時的嘗試」跟「同一個 owner 之後又開的新嘗試」。
+          const attemptGeneration = (this.leaseAttempt.get(job.name) || 0) + 1;
+          this.leaseAttempt.set(job.name, attemptGeneration);
+
           const acquirePromise = this.leaseStore.acquire(job.name, {
             owner: this.owner,
-            leaseMs: job.timeoutMs + this.schedulerConfig.clusterLeaseGraceMs
+            leaseMs: job.timeoutMs + this.schedulerConfig.clusterLeaseGraceMs,
+            // 逾時時把同一個 signal 往下傳，讓 acquire() 能中斷還在飛的交易，
+            // 而不是繼續跑到底。這把下面的「遲到成功」窗口從整段 acquire
+            // 耗時，縮小到 abort 事件跟 COMMIT ack 競爭的那幾毫秒。
+            signal: controller.signal
           });
           // 逾時獲勝的話這個 promise 還在背景跑，沒有人會再 await 它——不接住
           // 的話它遲早 reject 成一個 unhandled rejection。
@@ -327,6 +340,40 @@ export class SchedulerService extends BaseService {
               "Cluster job lease acquisition exceeded the job timeout",
               { job: job.name, owner: this.owner, timeoutMs: job.timeoutMs }
             );
+
+            // signal 取消交易通常會讓 acquirePromise 直接 reject，但 abort
+            // 事件跟 COMMIT ack 之間仍有一個窄窗：acquire() 可能還是遲來地
+            // 回傳 true——那是一個沒有人在等的租約，會一路留到自然過期。
+            // 只要它真的拿到了，就立刻補償性釋放；但如果同一個 owner 這段
+            // 時間內已經開了更新的嘗試（世代編號變了），代表現在的租約可能
+            // 是那個新嘗試合法拿到的，不能碰。
+            //
+            // 用 then(onFulfilled, onRejected) 而不是 .catch()：acquirePromise
+            // 因為取消而 reject 是預期行為，不該被當成錯誤記錄；只有下面
+            // release() 本身失敗才值得記一筆。
+            void acquirePromise.then((acquired) => {
+              if (!acquired || this.leaseAttempt.get(job.name) !== attemptGeneration) {
+                return;
+              }
+
+              return this.leaseStore.release(job.name, this.owner).then(
+                () => {
+                  void this.logger.warn(
+                    "scheduler.lease.late_release",
+                    "A lease acquisition that had already timed out succeeded afterwards; released it",
+                    { job: job.name, owner: this.owner }
+                  );
+                },
+                (error) => {
+                  void this.logger.error(
+                    "scheduler.lease.late_release_failed",
+                    "Could not release a lease that succeeded after its acquisition timed out",
+                    { job: job.name, owner: this.owner, error: { name: error.name, message: error.message } }
+                  );
+                }
+              );
+            }, () => {});
+
             return;
           }
 
