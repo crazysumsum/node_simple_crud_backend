@@ -108,10 +108,63 @@ test("the service refuses to start on an invalid jwt config", () => {
   );
 });
 
-test("issuing without a subject leaves sub unset", () => {
+test("issuing without a subject is refused", () => {
   const service = createService();
-  const claims = service.verify(service.issue({ role: "guest" }));
 
-  assert.equal(claims.sub, undefined);
-  assert.equal(claims.role, "guest");
+  // sub 是撤銷唯一的 key。少了它，那個 token 對登出、改密碼、強制下線全部免疫，
+  // 而且沒有任何症狀——簽不出來遠比簽出一個永遠撤銷不掉的 token 好。
+  assert.throws(() => service.issue({ role: "guest" }), /requires a subject/);
+  assert.throws(() => service.issue({ role: "guest" }, {}), /requires a subject/);
+  assert.throws(
+    () => service.issue({ role: "guest" }, { subject: "" }),
+    /requires a subject/
+  );
+  assert.throws(
+    () => service.issue({ role: "guest" }, { subject: "   " }),
+    /requires a subject/
+  );
+});
+
+test("a token that arrives without sub is rejected at verification", () => {
+  const service = createService();
+
+  // issue() 擋不到手工造的 token：拿著密鑰的人可以簽一個沒有 sub 的，那正是
+  // 撤銷不掉的那一種。驗證端必須自己再看一次。
+  const withoutSubject = jwt.sign({ role: "admin" }, secret, {
+    algorithm: "HS256",
+    issuer: "erp-api",
+    audience: "erp-client",
+    expiresIn: "2h"
+  });
+
+  assert.throws(() => service.verify(withoutSubject), (error) => {
+    // JsonWebTokenError 讓 JwtAuthStrategy 現有的 catch 原樣接住：原因進日誌，
+    // 對外仍然只有籠統的 JWT_INVALID。
+    assert.equal(error.name, "JsonWebTokenError");
+    assert.match(error.message, /subject is required/);
+    return true;
+  });
+
+  const blankSubject = jwt.sign({ role: "admin", sub: "  " }, secret, {
+    algorithm: "HS256",
+    issuer: "erp-api",
+    audience: "erp-client",
+    expiresIn: "2h"
+  });
+
+  assert.throws(() => service.verify(blankSubject), /subject is required/);
+});
+
+test("expiresIn must carry a unit, because a bare number means milliseconds", () => {
+  // jsonwebtoken 收到字串時一律走 ms()，而 ms("3600") 是 3600 毫秒——
+  // JWT_EXPIRES_IN=3600 會簽出 3 秒壽命的 token，沒有任何地方會說出來。
+  assert.throws(() => createService({ expiresIn: "3600" }), /must be a whole number with a unit/);
+  assert.throws(() => createService({ expiresIn: "banana" }), /must be a whole number with a unit/);
+  assert.throws(() => createService({ expiresIn: "0h" }), /must be greater than zero/);
+
+  // 帶單位的寫法照舊，而且解析出來的秒數與 jsonwebtoken 實際簽出來的一致。
+  const service = createService({ expiresIn: "30m" });
+  const claims = service.verify(service.issue({ role: "admin" }, { subject: "u-1" }));
+
+  assert.equal(claims.exp - claims.iat, 1800);
 });

@@ -146,12 +146,13 @@ test("application factory builds a startable and stoppable API with injected res
   t.after(() => application.shutdown("test_cleanup"));
 
   assert.equal(application.state, "created");
-  // 啟動時剛好兩次查詢：連線驗證，以及撤銷名單的首次載入。數字釘死是為了擋住
-  // 「每個 service 都在啟動時順手打一次資料庫」這種會慢慢長出來的問題。
-  assert.equal(pool.calls.query, 2);
+  // 啟動時剛好三次查詢：連線驗證，以及撤銷名單首次載入的那兩句——資料庫時鐘
+  // （用來比對本機時鐘有沒有偏差）與名單本身。數字釘死是為了擋住「每個 service
+  // 都在啟動時順手打一次資料庫」這種會慢慢長出來的問題。
+  assert.equal(pool.calls.query, 3);
   const { url } = await application.start();
   // start() 只是開始監聽，不該再產生查詢。
-  assert.equal(pool.calls.query, 2);
+  assert.equal(pool.calls.query, 3);
   const response = await fetch(`${url}/api/v1/health`);
   const body = await response.json();
 

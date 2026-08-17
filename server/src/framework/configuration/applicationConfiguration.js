@@ -22,6 +22,7 @@ import { normalizeRequestConfig } from "./normalizeRequestConfig.js";
 import { normalizeRequestLimiterConfig } from "../../services/requestLimiter/normalizeRequestLimiterConfig.js";
 import { normalizeSchedulerConfig } from "../../services/scheduler/normalizeSchedulerConfig.js";
 import { normalizeTokenRevocationConfig } from "../../services/tokenRevocation/normalizeTokenRevocationConfig.js";
+import { JOB_NAME as REVOCATION_REFRESH_JOB } from "../../services/tokenRevocation/jobs/TokenRevocationRefreshJob.js";
 
 export function defaultConfigurationSource() {
   return {
@@ -114,9 +115,12 @@ export function validateApplicationConfiguration(
  * 沒有上限、或讓某個設定值從此是一句空話。
  */
 function crossSectionChecks(normalized, details, { heapLimitBytes }) {
-  const { application, database, logging, requestLimiter } = normalized;
+  const { application, database, jwt, logging, requestLimiter, scheduler, tokenRevocation } =
+    normalized;
 
   checkLogQueueBudget(logging, heapLimitBytes, details);
+  checkRevocationRetention(jwt, tokenRevocation, details);
+  checkRevocationRefreshScheduled(scheduler, details);
 
   if (!application || !database) {
     return;
@@ -188,6 +192,78 @@ function crossSectionChecks(normalized, details, { heapLimitBytes }) {
         "or the pool starts rejecting queries at ordinary full load."
     });
   }
+}
+
+/**
+ * 撤銷切線的保留期，蓋不蓋得過最長的 token 壽命。
+ *
+ * 清理工作刪的是 revoked_before < now - retentionSeconds 的列。保留期比 token
+ * 壽命短的話，那一列被刪掉時仍然有活著的 token 早於它——已撤銷的 token 重新
+ * 有效，而且兩邊各自都在做對的事，不會有任何錯誤浮現。實測 30d 的 token 配
+ * 出廠的 7d 保留期，被撤銷的 token 會復活 23 天。
+ *
+ * 這條關係跨兩個設定檔（config/jwt.js 與 config/tokenRevocation.js），任一邊
+ * 單獨看都合法，所以只能擋在啟動。
+ */
+function checkRevocationRetention(jwt, tokenRevocation, details) {
+  if (!jwt || !tokenRevocation) {
+    return;
+  }
+
+  // iat 來自簽發節點的時鐘、切線來自資料庫時鐘，exp 的驗證還另外帶
+  // clockTolerance。邊界要把兩種誤差都算進去，否則剛好卡在邊緣的那一批仍然
+  // 會復活。
+  const requiredSeconds =
+    jwt.expiresInSeconds +
+    jwt.clockToleranceSeconds +
+    tokenRevocation.maxClockSkewSeconds;
+
+  if (tokenRevocation.retentionSeconds < requiredSeconds) {
+    details.push({
+      section: "tokenRevocation",
+      message:
+        `"retentionSeconds" (${tokenRevocation.retentionSeconds}s) must be at least ` +
+        `jwt.expiresIn (${jwt.expiresIn} = ${jwt.expiresInSeconds}s) plus ` +
+        `jwt.clockToleranceSeconds (${jwt.clockToleranceSeconds}s) plus ` +
+        `"maxClockSkewSeconds" (${tokenRevocation.maxClockSkewSeconds}s) = ` +
+        `${requiredSeconds}s, or the purge job deletes cut-lines while tokens issued ` +
+        "before them are still alive, and revoked tokens become valid again."
+    });
+  }
+}
+
+/**
+ * 有沒有人在刷新撤銷快照。
+ *
+ * 快照活在每個實例的記憶體裡，只有 tokenRevocation.refresh 這件工作會更新它。
+ * 關掉它——不論是整個排程器還是單獨覆寫——啟動都照樣成功，然後：
+ * failureMode "closed" 會在 maxFailOpenSeconds 之後讓每個帶 JWT 的請求變成
+ * 503，一個排程設定造成的全站故障，而且延遲幾分鐘才出現，看起來完全不像設定
+ * 問題；failureMode "open" 則是撤銷從啟動那一刻起永遠不再生效，更安靜。
+ *
+ * 兩種結局都不能接受，所以這裡不看 failureMode。代價是 JWT 認證還在用
+ * tokenRevocation 時，scheduler.enabled = false 不再是一個可用的部署選項。
+ */
+function checkRevocationRefreshScheduled(scheduler, details) {
+  if (!scheduler) {
+    return;
+  }
+
+  const override = scheduler.jobs[REVOCATION_REFRESH_JOB];
+
+  if (scheduler.enabled && override?.enabled !== false) {
+    return;
+  }
+
+  details.push({
+    section: "scheduler",
+    message:
+      `Job "${REVOCATION_REFRESH_JOB}" is disabled ("enabled" is ${scheduler.enabled} on the ` +
+      `scheduler and ${override?.enabled} on the job). Nothing would refresh the JWT ` +
+      "revocation snapshot: with tokenRevocation.failureMode \"closed\" every JWT request " +
+      "answers 503 once the snapshot passes maxFailOpenSeconds, and with \"open\" revocation " +
+      "silently stops applying. Re-enable the job, or stop using JWT authentication."
+  });
 }
 
 /**

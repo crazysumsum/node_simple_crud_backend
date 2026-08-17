@@ -43,6 +43,10 @@ function fakeDatabase({ rows = [], dbNowSeconds = 1_000_000, fail = null } = {})
       return [[{ cutoff: state.dbNowSeconds + 1 }]];
     }
 
+    if (sql.includes("UNIX_TIMESTAMP() AS db_now")) {
+      return [[{ db_now: state.dbNowSeconds }]];
+    }
+
     if (sql.includes("SELECT subject, revoked_before")) {
       return [state.rows.map((row) => ({ ...row }))];
     }
@@ -82,12 +86,20 @@ function fakeDatabase({ rows = [], dbNowSeconds = 1_000_000, fail = null } = {})
   return { state, query: run, execute: run };
 }
 
-function createService({ database, time = createTestTime(), logger = collectingLogger(), config } = {}) {
+function createService({ database, time, logger = collectingLogger(), config } = {}) {
+  // 預設讓本機時鐘與 fake 資料庫的時鐘一致。兩者不同步是一個有自己意義的情境
+  // ——它正是撤銷會被繞過的原因，有專門的測試——不該當成每個測試的隱含背景，
+  // 否則偏差告警在哪裡響過都沒人看得出來。
+  const clock =
+    time ??
+    createTestTime({
+      clock: () => new Date((database?.state.dbNowSeconds ?? 0) * 1000)
+    });
   const service = new TokenRevocationService({
     config: { tokenRevocation: config ?? {} },
     services: {
       require: (name) =>
-        ({ mysqldatabase: database, logging: { logger }, time })[name]
+        ({ mysqldatabase: database, logging: { logger }, time: clock })[name]
     }
   });
 
@@ -133,8 +145,11 @@ test("a token issued before the cutoff is revoked, one issued after is not", asy
   assert.equal(service.isRevoked({ sub: "42", iat: 1001 }), false);
   // 沒有被撤銷過的 subject 完全不受影響。
   assert.equal(service.isRevoked({ sub: "99", iat: 1 }), false);
-  // 沒有 sub 的 token 不屬於任何人，切線無從套用。
-  assert.equal(service.isRevoked({ iat: 1 }), false);
+  // 沒有 sub 就沒有 key 可查。放行的話那個 token 對所有撤銷免疫，所以唯一
+  // fail closed 的答案是當作已撤銷——與下面 iat 缺失同一條規則。
+  assert.equal(service.isRevoked({ iat: 1 }), true);
+  assert.equal(service.isRevoked({ sub: "", iat: 1 }), true);
+  assert.equal(service.isRevoked({ sub: "   ", iat: 1 }), true);
 });
 
 test("a token without iat is treated as revoked", async () => {
@@ -157,13 +172,24 @@ test("the cutoff comes from the database clock, not the local one", async () => 
   const database = fakeDatabase({ dbNowSeconds: 5_000 });
   // 本機時鐘刻意超前資料庫 1000 秒，模擬未同步的機器。
   const time = createTestTime({ clock: () => new Date(6_000_000) });
-  const { service } = createService({ database, time });
+  const { service, logger } = createService({ database, time });
   await service.initialize();
 
   const cutoff = await service.revoke("42");
 
   // 用本機時鐘的話會是 6001，一台機器上簽發的 token 就會逃過另一台的撤銷。
   assert.equal(cutoff, 5_001);
+
+  // 切線用對時鐘只解決了寫入那一側：iat 仍然來自簽發節點自己的時鐘，所以偏差
+  // 依然會讓 iat < revokedBefore 的比較失守。這裡不去補償它（往切線加容忍值會
+  // 讓「改密碼後立刻重新登入」拿到一個一簽出來就無效的 token），但偏差必須在
+  // 造成失守之前先變成一則 error。
+  const entry = logger.entries.find(
+    ({ event }) => event === "auth.revocation.clock_skew"
+  );
+  assert.equal(entry.level, "error");
+  assert.equal(entry.context.skewSeconds, 1_000);
+  assert.equal(entry.context.maxClockSkewSeconds, 60);
 });
 
 test("the cutoff covers tokens issued in the same second", async () => {
@@ -224,6 +250,7 @@ test("revoking without a subject is rejected", async () => {
 test("a failed refresh keeps serving the old snapshot and says how stale it is", async () => {
   let nowMs = 1_000_000;
   const database = fakeDatabase({
+    dbNowSeconds: nowMs / 1000,
     rows: [{ subject: "42", revoked_before: 1000 }]
   });
   const time = createTestTime({ clock: () => new Date(nowMs) });
@@ -254,7 +281,7 @@ test("a failed refresh keeps serving the old snapshot and says how stale it is",
  */
 function stalableService({ config, rows = [{ subject: "42", revoked_before: 1000 }] } = {}) {
   let nowMs = 1_000_000;
-  const database = fakeDatabase({ rows });
+  const database = fakeDatabase({ dbNowSeconds: nowMs / 1000, rows });
   const time = createTestTime({ clock: () => new Date(nowMs) });
   const { service, logger } = createService({ database, time, config });
 
@@ -438,8 +465,57 @@ test("the configuration rejects values that would silently weaken revocation", (
   assert.equal(defaults.maxStalenessSeconds, 60);
   assert.equal(defaults.retentionSeconds, 604800);
   assert.equal(defaults.maxFailOpenSeconds, 300);
+  assert.equal(defaults.maxClockSkewSeconds, 60);
   // 預設熔斷，跟啟動時的立場一致：首載失敗就是啟動失敗。
   assert.equal(defaults.failureMode, "closed");
+});
+
+test("a zero clock skew allowance is legal, a negative one is not", () => {
+  // 0 是一個有意義的選擇：單機部署、或 iat 也取自資料庫時鐘時，偏差保證是零，
+  // 沒有理由為它付出保留期的邊界。所以它不能套 positiveInteger。
+  assert.equal(
+    normalizeTokenRevocationConfig({ maxClockSkewSeconds: 0 }).maxClockSkewSeconds,
+    0
+  );
+  assert.throws(
+    () => normalizeTokenRevocationConfig({ maxClockSkewSeconds: -1 }),
+    /"maxClockSkewSeconds" must be a non-negative integer/
+  );
+  assert.throws(
+    () => normalizeTokenRevocationConfig({ maxClockSkewSeconds: 1.5 }),
+    /"maxClockSkewSeconds" must be a non-negative integer/
+  );
+});
+
+test("a clock inside the allowance is not reported", async () => {
+  const database = fakeDatabase({ dbNowSeconds: 5_000 });
+  // 本機落後 59 秒，仍在 60 秒的容許範圍內。
+  const time = createTestTime({ clock: () => new Date((5_000 - 59) * 1000) });
+  const { service, logger } = createService({ database, time });
+
+  await service.initialize();
+
+  // 對時正常的機器每 30 秒記一筆 error 的話，這則日誌會在兩週內被靜音，然後
+  // 真正的偏差就沒人看見。
+  assert.equal(
+    logger.entries.some(({ event }) => event === "auth.revocation.clock_skew"),
+    false
+  );
+});
+
+test("a clock behind the database is reported too", async () => {
+  const database = fakeDatabase({ dbNowSeconds: 5_000 });
+  // 落後的時鐘不會繞過切線，但它同樣代表機器沒有在對時——而下一次偏移可能是
+  // 往另一個方向。所以報的是絕對值，不是只有偏快那一側。
+  const time = createTestTime({ clock: () => new Date((5_000 - 600) * 1000) });
+  const { service, logger } = createService({ database, time });
+
+  await service.initialize();
+
+  const entry = logger.entries.find(
+    ({ event }) => event === "auth.revocation.clock_skew"
+  );
+  assert.equal(entry.context.skewSeconds, -600);
 });
 
 test("the fail open cap must not be tighter than the staleness guarantee", () => {
