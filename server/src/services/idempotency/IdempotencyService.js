@@ -52,8 +52,8 @@ function uploadFingerprint(req) {
 }
 
 export class IdempotencyError extends ApplicationError {
-  constructor(code, message, statusCode) {
-    super(message, { code, statusCode, publicMessage: message });
+  constructor(code, message, statusCode, { cause } = {}) {
+    super(message, { code, statusCode, publicMessage: message, cause });
   }
 }
 
@@ -203,10 +203,22 @@ export class IdempotencyService {
         owner
       });
     } catch (error) {
+      // 根因（連線逾時、ER_XXX……）留在伺服器端的日誌裡；客戶端只需要知道
+      // 這是暫時性的基礎設施問題，不需要、也不該收到內部細節。
+      void this.logger?.error?.(
+        "idempotency.store.begin_failed",
+        "Failed to start an idempotency-guarded request",
+        {
+          requestId: req.requestId || null,
+          path: route.path,
+          error: { name: error.name, message: error.message }
+        }
+      );
       throw new IdempotencyError(
         "IDEMPOTENCY_STORE_FAILED",
         "Idempotency service is unavailable",
-        503
+        503,
+        { cause: error }
       );
     }
 

@@ -232,7 +232,7 @@ test("a store that throws on begin becomes a 503, not a 500", async () => {
       throw new Error("redis is unreachable");
     }
   });
-  const { manager } = createManager(store);
+  const { manager, logger } = createManager(store);
 
   await assert.rejects(
     () => manager.execute(createRequest(), createResponse(), routeOptions, () => "ok"),
@@ -240,11 +240,19 @@ test("a store that throws on begin becomes a 503, not a 500", async () => {
       // store 掛掉是暫時性的基礎設施問題，回 503 才會讓客戶端重試。
       assert.equal(error.code, "IDEMPOTENCY_STORE_FAILED");
       assert.equal(error.statusCode, 503);
-      // 內部原因不得外洩給客戶端。
+      // 內部原因不得外洩給客戶端……
       assert.doesNotMatch(error.publicMessage, /redis/i);
+      // ……但根因不能整個被吞掉，否則資料庫故障時 system log 只剩一句泛化
+      // 訊息，排查只能靠猜。
+      assert.equal(error.cause?.message, "redis is unreachable");
       return true;
     }
   );
+
+  const logged = logger.entries.find((entry) => entry.event === "idempotency.store.begin_failed");
+  assert.ok(logged, "begin() 失敗時應該留下日誌，而不是只把錯誤往上拋");
+  assert.equal(logged.level, "error");
+  assert.equal(logged.context.error.message, "redis is unreachable");
 });
 
 test("an over-long idempotency key is rejected before the store is touched", async () => {
