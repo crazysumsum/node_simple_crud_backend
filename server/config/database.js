@@ -95,7 +95,24 @@ const databaseConfig = {
   //
   // acquireTimeoutMs 加上這個值必須小於 application.requestTimeoutMs，否則
   // route 先回 504，交易還在跑。啟動時會檢查。
-  transactionTimeoutMs: Number(process.env.DB_TRANSACTION_TIMEOUT_MS || 20000)
+  transactionTimeoutMs: Number(process.env.DB_TRANSACTION_TIMEOUT_MS || 20000),
+
+  // 是否對 MySQL 連線啟用 TLS。DB_HOST 指向非本機資料庫時應設為 true，否則
+  // 帳密與查詢內容（含 ERP 資料）都會用明文送出。
+  ssl: {
+    enabled: process.env.DB_SSL_ENABLED === "true",
+
+    // 憑證頒發機構（CA）的 PEM 內容。多數代管 MySQL（RDS、Cloud SQL 等）用的
+    // 是內建信任清單驗不到的 CA，要把它的憑證餵進來才能建立信任鏈。環境變數
+    // 存不了多行字串，所以允許把換行寫成字面上的 "\n"。
+    ca: process.env.DB_SSL_CA
+      ? process.env.DB_SSL_CA.replace(/\\n/g, "\n")
+      : undefined,
+
+    // 設為 false 會關閉憑證驗證，形同接受任何憑證。只能用在明確知道風險的情境
+    // （例如本機以自簽憑證測試），正式環境不應該關閉。
+    rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false"
+  }
 };
 
 export default databaseConfig;

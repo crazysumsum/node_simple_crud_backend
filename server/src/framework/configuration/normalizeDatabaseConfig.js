@@ -38,6 +38,19 @@ function requiredText(value, key) {
   return text;
 }
 
+function sslConfig(value) {
+  if (!value?.enabled) {
+    return undefined;
+  }
+
+  const ca = value.ca ? requiredText(value.ca, "ssl.ca") : undefined;
+
+  return {
+    ...(ca ? { ca } : {}),
+    rejectUnauthorized: value.rejectUnauthorized !== false
+  };
+}
+
 const ABANDONED_CONNECTION_ACTIONS = new Set(["destroy", "release"]);
 
 export function normalizeDatabaseConfig(source) {
@@ -74,6 +87,7 @@ export function normalizeDatabaseConfig(source) {
       source?.transactionTimeoutMs,
       "transactionTimeoutMs",
       { minimum: 1 }
-    )
+    ),
+    ssl: sslConfig(source?.ssl)
   });
 }
