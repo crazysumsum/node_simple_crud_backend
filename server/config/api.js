@@ -126,12 +126,23 @@ const apiConfig = {
     //
     // 上傳在校驗通過之前完整累積在記憶體裡，所以這個數字乘上單一請求的
     // maxRequestBytes 就是這個程序的上傳記憶體上界。啟動時會把乘積寫進
-    // api.upload_budget 這筆日誌。
+    // api.upload_budget 這筆日誌，並與下面的 maxUploadMemoryBytes 比對。
     //
     // 滿載時不排隊是刻意的：排隊會讓客戶端握著連線慢慢傳，而佔住槽位正是這裡
     // 要防的事。限流器的佇列之所以安全，是因為排隊中的請求還沒開始解析、
     // 手上沒有任何 buffer。
-    maxConcurrentUploads: 10
+    maxConcurrentUploads: 10,
+
+    // 這個實例願意花在上傳緩衝上的記憶體上限（bytes）。
+    //
+    // 上面那個乘積是真的被強制的，但先前沒有任何東西檢查它是否負擔得起：
+    // maxConcurrentUploads: 500 配 100MB 的 route 會安靜地啟動，日誌印出 50GB，
+    // 然後在負載下被 OOM killer 殺掉——那些位元組是 Buffer，落在 V8 堆之外，
+    // --max-old-space-size 擋不住，不會有例外也不會有堆疊。
+    //
+    // 啟動時若乘積超過這個數字就拒絕啟動。調整時請對著容器的記憶體上限來設，
+    // 並留出應用程式本身的用量。
+    maxUploadMemoryBytes: 268435456
   }
 };
 

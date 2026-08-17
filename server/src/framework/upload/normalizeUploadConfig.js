@@ -178,6 +178,15 @@ export function normalizeApiUploadConfig(source, label = "API config upload") {
       "maxConcurrentUploads",
       label,
       { maximum: MAX_FILES_CEILING * 100 }
+    ),
+    // 這個實例願意花在上傳緩衝上的記憶體。乘積本身是被強制的（gate 管併發數，
+    // 每條 route 的 maxRequestBytes 管單一請求），但先前沒有任何東西檢查那個
+    // 乘積是不是這台機器負擔得起——設得再大也照樣啟動，然後在負載下被 OOM
+    // killer 無聲殺掉。dispatcher 在註冊完所有 route 之後拿它做啟動檢查。
+    maxUploadMemoryBytes: positiveInteger(
+      source.maxUploadMemoryBytes ?? 268435456,
+      "maxUploadMemoryBytes",
+      label
     )
   });
 }
