@@ -10,6 +10,10 @@ import { BaseService } from "../../framework/services/BaseService.js";
  */
 export const MAX_STATS_ERROR_LENGTH = 500;
 
+// race() 用的哨兵值：租約取得跟 job.run() 共用同一個 timeoutMs 預算，逾時是
+// 誰先發生分不出來單看回傳值，要一個跟正常回傳值（true/false）不會混淆的記號。
+const LEASE_ACQUIRE_TIMED_OUT = Symbol("schedulerLeaseAcquireTimedOut");
+
 function describeError(error) {
   const text = `${error?.name || "Error"}: ${error?.message || ""}`;
   return text.length > MAX_STATS_ERROR_LENGTH
@@ -252,58 +256,101 @@ export class SchedulerService extends BaseService {
       return;
     }
 
-    let leaseHeld = false;
-
-    if (job.scope === "cluster") {
-      try {
-        leaseHeld = await this.leaseStore.acquire(job.name, {
-          owner: this.owner,
-          leaseMs: job.timeoutMs + this.schedulerConfig.clusterLeaseGraceMs
-        });
-      } catch (error) {
-        stats.failures += 1;
-        stats.consecutiveFailures += 1;
-        // 工作本身沒有跑，但這一輪確實失敗了。記成一次結果為 leaseFailed 的
-        // 嘗試，否則症狀只剩下「runs 停止增加」，看不出是資料庫的問題。
-        const at = this.time.nowMs();
-        stats.lastStartedAt = at;
-        stats.lastFinishedAt = at;
-        stats.lastDurationMs = 0;
-        stats.lastOutcome = "leaseFailed";
-        stats.lastError = describeError(error);
-        void this.logger.error("scheduler.lease.failed", "Could not acquire a cluster job lease", {
-          job: job.name,
-          owner: this.owner,
-          error: { name: error.name, message: error.message }
-        });
-        return;
-      }
-
-      if (!leaseHeld) {
-        // 另一個實例拿到了這一輪。這是正常運作，不是問題。
-        stats.skippedNotLeader += 1;
-        void this.logger.debug?.("scheduler.job.not_leader", "Another instance holds this job lease", {
-          job: job.name
-        });
-        return;
-      }
-    }
-
     const controller = new AbortController();
     const startedAt = this.time.nowMs();
-    stats.lastStartedAt = startedAt;
-    // 進行中就是進行中：把上一輪的完成時間留在欄位裡，會讓讀的人以為那是這一
-    // 輪的結果。
-    stats.lastFinishedAt = null;
-    stats.lastDurationMs = null;
-    stats.lastOutcome = "running";
+    // timeoutMs 從這裡開始算，取租約也算在裡面——租約取得本身沒有計時器保護，
+    // 慢的資料庫可以讓它無限期掛著；不把它包進同一個預算的話，這段 await 就
+    // 完全不受任何上限節制。
     const timeout = this.setTimer(() => {
       controller.abort(new Error(`Job "${job.name}" exceeded ${job.timeoutMs}ms`));
     }, job.timeoutMs);
     timeout?.unref?.();
 
+    // running 的佔位必須在這裡、在任何 await 之前完成同步設定。租約取得是一個
+    // await：慢的話，排程器可能在它 resolve 之前就已經觸發下一輪 tick，那一輪
+    // 一樣會看到 running 是空的，通過上面的重疊檢查，對同一個 job 重複發出
+    // acquire()。把租約取得整段搬進這個立即呼叫的 async function 裡，
+    // 讓外層在它第一次 await 之前就跑到 running.set()，這個空窗就不存在了。
     const settled = (async () => {
+      let leaseHeld = false;
+
       try {
+        if (job.scope === "cluster") {
+          const acquirePromise = this.leaseStore.acquire(job.name, {
+            owner: this.owner,
+            leaseMs: job.timeoutMs + this.schedulerConfig.clusterLeaseGraceMs
+          });
+          // 逾時獲勝的話這個 promise 還在背景跑，沒有人會再 await 它——不接住
+          // 的話它遲早 reject 成一個 unhandled rejection。
+          acquirePromise.catch(() => {});
+
+          const timedOut = new Promise((resolve) => {
+            controller.signal.addEventListener("abort", () => resolve(LEASE_ACQUIRE_TIMED_OUT), {
+              once: true
+            });
+          });
+          let result;
+
+          try {
+            result = await Promise.race([acquirePromise, timedOut]);
+          } catch (error) {
+            stats.failures += 1;
+            stats.consecutiveFailures += 1;
+            // 工作本身沒有跑，但這一輪確實失敗了。記成一次結果為 leaseFailed 的
+            // 嘗試，否則症狀只剩下「runs 停止增加」，看不出是資料庫的問題。
+            const finishedAt = this.time.nowMs();
+            stats.lastStartedAt = startedAt;
+            stats.lastFinishedAt = finishedAt;
+            stats.lastDurationMs = finishedAt - startedAt;
+            stats.lastOutcome = "leaseFailed";
+            stats.lastError = describeError(error);
+            void this.logger.error("scheduler.lease.failed", "Could not acquire a cluster job lease", {
+              job: job.name,
+              owner: this.owner,
+              error: { name: error.name, message: error.message }
+            });
+            return;
+          }
+
+          if (result === LEASE_ACQUIRE_TIMED_OUT) {
+            stats.failures += 1;
+            stats.consecutiveFailures += 1;
+            stats.timeouts += 1;
+            const finishedAt = this.time.nowMs();
+            stats.lastStartedAt = startedAt;
+            stats.lastFinishedAt = finishedAt;
+            stats.lastDurationMs = finishedAt - startedAt;
+            stats.lastOutcome = "leaseTimedOut";
+            stats.lastError = `Lease acquisition for job "${job.name}" exceeded ${job.timeoutMs}ms`;
+            void this.logger.error(
+              "scheduler.lease.timeout",
+              "Cluster job lease acquisition exceeded the job timeout",
+              { job: job.name, owner: this.owner, timeoutMs: job.timeoutMs }
+            );
+            return;
+          }
+
+          leaseHeld = result;
+
+          if (!leaseHeld) {
+            // 另一個實例拿到了這一輪。這是正常運作，不是問題。
+            stats.skippedNotLeader += 1;
+            void this.logger.debug?.("scheduler.job.not_leader", "Another instance holds this job lease", {
+              job: job.name
+            });
+            return;
+          }
+        }
+
+        // 只有真的要跑了才進入「執行中」狀態。not-leader 這類正常跳過不該
+        // 覆蓋上一輪真正執行的紀錄，計數器已經表達過那件事了。
+        stats.lastStartedAt = startedAt;
+        // 進行中就是進行中：把上一輪的完成時間留在欄位裡，會讓讀的人以為那是
+        // 這一輪的結果。
+        stats.lastFinishedAt = null;
+        stats.lastDurationMs = null;
+        stats.lastOutcome = "running";
+
         await job.run(controller.signal);
         stats.runs += 1;
         stats.consecutiveFailures = 0;

@@ -303,6 +303,79 @@ test("a lease store failure is reported and does not run the job", async () => {
   await scheduler.stop();
 });
 
+test("a slow lease acquisition reserves the running slot immediately, so a second tick cannot re-issue acquire()", async () => {
+  let releaseAcquire;
+  const acquireCalls = [];
+  const leaseStore = {
+    async prepare() {},
+    acquire(jobName, options) {
+      acquireCalls.push({ jobName, owner: options.owner });
+      return new Promise((resolve) => {
+        releaseAcquire = resolve;
+      });
+    },
+    async release() {}
+  };
+  const service = jobService([
+    { name: "demo.cluster", method: "work", intervalMs: 1000, timeoutMs: 100_000, scope: "cluster" }
+  ]);
+  const { scheduler, timers } = createScheduler({
+    jobs: { demo: service },
+    leaseStore,
+    random: () => 0
+  });
+
+  await scheduler.start();
+  await timers.advance(800);
+  assert.equal(acquireCalls.length, 1, "首次執行應該呼叫 acquire()");
+
+  // 第一輪的 acquire() 還沒 resolve，下一輪 tick 已經到了。
+  await timers.advance(1000);
+  assert.equal(acquireCalls.length, 1, "running 佔位必須在 acquire() 還沒 resolve 前就擋住下一輪");
+  assert.equal(scheduler.stats.get("demo.cluster").skippedOverlapping, 1);
+
+  releaseAcquire(true);
+  await timers.advance(0);
+  assert.equal(service.calls.length, 1, "租約終於拿到之後，工作應該正常執行一次");
+
+  await scheduler.stop();
+});
+
+test("a lease acquisition that exceeds the job timeout is aborted and reported, without running the job", async () => {
+  const acquireCalls = [];
+  const leaseStore = {
+    async prepare() {},
+    acquire(jobName, options) {
+      acquireCalls.push({ jobName, owner: options.owner });
+      return new Promise(() => {}); // 模擬卡住、永遠不 resolve 的租約查詢
+    },
+    async release() {}
+  };
+  const service = jobService([
+    { name: "demo.cluster", method: "work", intervalMs: 10_000, timeoutMs: 500, scope: "cluster" }
+  ]);
+  const { scheduler, timers, logger } = createScheduler({
+    jobs: { demo: service },
+    leaseStore,
+    random: () => 0
+  });
+
+  await scheduler.start();
+  await timers.advance(8000);
+  assert.equal(acquireCalls.length, 1);
+  await timers.advance(500);
+
+  assert.equal(service.calls.length, 0, "拿不到租約，工作本身不該執行");
+  const entry = logger.entries.find((c) => c.event === "scheduler.lease.timeout");
+  assert.ok(entry, "租約取得逾時必須留下記錄");
+  assert.equal(entry.context.job, "demo.cluster");
+  const stats = scheduler.stats.get("demo.cluster");
+  assert.equal(stats.timeouts, 1);
+  assert.equal(stats.lastOutcome, "leaseTimedOut");
+
+  await scheduler.stop();
+});
+
 test("instance-scoped jobs never touch the lease store", async () => {
   const service = jobService([
     { name: "demo.local", method: "work", intervalMs: 1000, timeoutMs: 200 }
