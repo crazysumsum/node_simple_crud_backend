@@ -13,6 +13,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import databaseConfig from "../config/database.js";
+import { normalizeDatabaseConfig } from "../src/framework/configuration/normalizeDatabaseConfig.js";
 import { createMySqlDatabasePool } from "../src/services/mysqldatabase/connection.js";
 
 const databaseDirectory = fileURLToPath(new URL("../database/", import.meta.url));
@@ -76,10 +77,19 @@ async function applyJs(connection, name) {
 }
 
 async function migrate() {
-  // multipleStatements: framework SQL 檔案裡不只一句 CREATE/ALTER，一般執行期
+  // 用跟應用程式執行期一樣的路徑正規化設定：config/database.js 的 ssl 是
+  // { enabled, ca, rejectUnauthorized } 這種給人讀的形狀，直接把它塞進
+  // mysql2 的 ssl 選項會不管 enabled 是不是 false 都建出一個物件、逼出 TLS
+  // 交握。normalizeDatabaseConfig 才會把它轉成 mysql2 認得的形狀（停用時是
+  // undefined）。
+  //
+  // multipleStatements：framework SQL 檔案裡不只一句 CREATE/ALTER，一般執行期
   // 的連線池不會開這個選項——只有這支腳本讀的是受信任的本機檔案，不是使用者
   // 輸入，開了也不會多出注入面。
-  const pool = createMySqlDatabasePool({ ...databaseConfig, multipleStatements: true });
+  const pool = createMySqlDatabasePool({
+    ...normalizeDatabaseConfig(databaseConfig),
+    multipleStatements: true
+  });
   const connection = await pool.getConnection();
 
   try {
