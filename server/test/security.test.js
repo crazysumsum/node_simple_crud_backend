@@ -15,7 +15,8 @@ import {
 } from "../src/framework/security/securityMiddleware.js";
 
 const silentLogger = {
-  error: async () => {}
+  error: async () => {},
+  isSensitiveField: () => false
 };
 const time = createTestTime();
 

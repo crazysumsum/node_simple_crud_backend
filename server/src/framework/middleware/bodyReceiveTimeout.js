@@ -1,4 +1,5 @@
 import { sendError } from "../http/apiResponse.js";
+import { redactUrl } from "../../services/logging/redactUrl.js";
 
 const DISARM = Symbol("bodyReceiveTimeoutDisarm");
 
@@ -77,7 +78,7 @@ export function createBodyReceiveTimeoutMiddleware({
         {
           requestId: req.requestId || null,
           method: req.method,
-          url: req.originalUrl || req.url,
+          url: redactUrl(req.originalUrl || req.url, (field) => logger.isSensitiveField(field)),
           // 這兩個數字合起來就是攻擊的簽名：一分鐘一百筆、每筆幾個位元組，
           // 和「客戶端網路慢」長得完全不一樣。
           receivedBytes,

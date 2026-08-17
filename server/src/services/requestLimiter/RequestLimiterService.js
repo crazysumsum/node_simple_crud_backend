@@ -9,6 +9,7 @@ import {
 import { clientQuotaKey } from "./clientKey.js";
 import { normalizeRequestLimiterConfig } from "./normalizeRequestLimiterConfig.js";
 import { MemoryRateLimitStore, RateLimitStore } from "./RateLimitStore.js";
+import { redactUrl } from "../logging/redactUrl.js";
 
 const TOO_MANY_REQUESTS = "Too Many Requests";
 const STORE_TIMEOUT = Symbol("requestLimiterStoreTimeout");
@@ -286,7 +287,7 @@ export class RequestLimiterService {
         requestId,
         clientIp,
         method: req.method,
-        url: req.originalUrl || req.url,
+        url: redactUrl(req.originalUrl || req.url, (field) => this.logger.isSensitiveField(field)),
         maxRequests: this.config.maxRequestsPerIpPerWindow,
         windowMs: this.config.ipWindowMs
       });
@@ -324,7 +325,7 @@ export class RequestLimiterService {
         requestId,
         clientIp,
         method: req.method,
-        url: req.originalUrl || req.url,
+        url: redactUrl(req.originalUrl || req.url, (field) => this.logger.isSensitiveField(field)),
         activeRequests: this.activeRequests,
         queuedRequests: this.queue.length,
         maxQueueSize: this.config.maxQueueSize
@@ -358,7 +359,10 @@ export class RequestLimiterService {
             requestId: ticket.requestId,
             clientIp: ticket.clientIp,
             method: ticket.req.method,
-            url: ticket.req.originalUrl || ticket.req.url,
+            url: redactUrl(
+              ticket.req.originalUrl || ticket.req.url,
+              (field) => this.logger.isSensitiveField(field)
+            ),
             queueTimeoutMs: this.config.queueTimeoutMs
           }
         );
@@ -372,7 +376,10 @@ export class RequestLimiterService {
       requestId: ticket.requestId,
       clientIp: ticket.clientIp,
       method: ticket.req.method,
-      url: ticket.req.originalUrl || ticket.req.url,
+      url: redactUrl(
+        ticket.req.originalUrl || ticket.req.url,
+        (field) => this.logger.isSensitiveField(field)
+      ),
       activeRequests: this.activeRequests,
       queuedRequests: this.queue.length
     });
@@ -507,7 +514,10 @@ export class RequestLimiterService {
           requestId: ticket.requestId,
           clientIp: ticket.clientIp,
           method: ticket.req.method,
-          url: ticket.req.originalUrl || ticket.req.url,
+          url: redactUrl(
+            ticket.req.originalUrl || ticket.req.url,
+            (field) => this.logger.isSensitiveField(field)
+          ),
           api: ticket.req.apiRoute || null,
           graceMs: this.config.abandonGraceMs,
           abandonedRequests: this.abandonedRequests,

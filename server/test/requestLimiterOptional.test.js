@@ -24,7 +24,8 @@ function memoryLogger() {
     info: write("info"),
     warn: write("warn"),
     error: write("error"),
-    flush: async () => {}
+    flush: async () => {},
+    isSensitiveField: () => false
   };
 }
 

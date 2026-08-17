@@ -4,6 +4,7 @@ import {
   maybeMarkRequestAbandoned,
   onRequestProcessingComplete
 } from "../http/requestProcessingLifecycle.js";
+import { redactUrl } from "../../services/logging/redactUrl.js";
 
 export class RequestTimeoutError extends ApplicationError {
   constructor(timeoutMs) {
@@ -110,7 +111,7 @@ export function createRequestTimeoutMiddleware({
       void logger.warn("http.request_timeout", "HTTP request timed out", {
         requestId: req.requestId || null,
         method: req.method,
-        url: req.originalUrl || req.url,
+        url: redactUrl(req.originalUrl || req.url, (field) => logger.isSensitiveField(field)),
         api: req.apiRoute || null,
         timeoutMs: normalizedTimeoutMs,
         elapsedMs: time.nowMs() - startedAt,

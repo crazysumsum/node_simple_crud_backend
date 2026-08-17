@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { reportInternalFailure } from "../diagnostics/reportInternalFailure.js";
+import { redactUrl } from "../../services/logging/redactUrl.js";
 
 // 未記錄的 body 會留下標記，讓日誌讀者分得出「政策決定不記」與「本來就沒有」。
 const NOT_LOGGED = "[NOT_LOGGED]";
@@ -75,30 +76,6 @@ function requestIdFrom(req) {
   }
 
   return randomUUID();
-}
-
-/**
- * 直接清理原始 URL 的 query string，避免完整 URL 欄位留下敏感參數。
- */
-function redactUrl(url, isSensitiveField) {
-  const value = String(url || "");
-  const queryIndex = value.indexOf("?");
-
-  if (queryIndex === -1) {
-    return value;
-  }
-
-  const pathname = value.slice(0, queryIndex);
-  const searchParams = new URLSearchParams(value.slice(queryIndex + 1));
-
-  for (const key of new Set(searchParams.keys())) {
-    if (isSensitiveField(key)) {
-      searchParams.set(key, "[REDACTED]");
-    }
-  }
-
-  const query = searchParams.toString();
-  return query ? `${pathname}?${query}` : pathname;
 }
 
 /**
@@ -260,5 +237,3 @@ export function createRequestLogger({ logger, time } = {}) {
 
   return middleware;
 }
-
-export { redactUrl };

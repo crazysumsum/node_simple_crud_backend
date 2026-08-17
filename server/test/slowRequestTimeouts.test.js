@@ -246,7 +246,14 @@ function collectingLogger() {
   const entries = [];
   const write = (level) => async (event, message, context) =>
     entries.push({ level, event, context });
-  return { entries, debug: write("debug"), info: write("info"), warn: write("warn"), error: write("error") };
+  return {
+    entries,
+    debug: write("debug"),
+    info: write("info"),
+    warn: write("warn"),
+    error: write("error"),
+    isSensitiveField: () => false
+  };
 }
 
 test("the watchdog refuses to be built without a usable timeout", () => {
@@ -357,7 +364,8 @@ async function startApplication(t, overrides = {}) {
     },
     logger: {
       debug: async () => {}, info: async () => {}, warn: async () => {},
-      error: async () => {}, flush: async () => {}
+      error: async () => {}, flush: async () => {},
+      isSensitiveField: () => false
     },
     requestLogger: (_req, _res, next) => next(),
     serviceOptions: { mysqldatabase: fakeDatabaseOptions() },

@@ -25,6 +25,7 @@ import {
   createApiLifecycleMiddleware,
   normalizeApiLifecycle
 } from "../versioning/apiLifecycle.js";
+import { redactUrl } from "../../services/logging/redactUrl.js";
 
 const HTTP_METHODS = new Set(["delete", "get", "patch", "post", "put"]);
 // Express 5 移除了 :param? 與裸 * 兩種寫法。提早比對可換來清楚的設定錯誤訊息，
@@ -488,7 +489,7 @@ export function createApiDispatcher({
     void activeLogger.warn("api.not_registered", "Unregistered API request blocked", {
       requestId: req.requestId || null,
       method: req.method,
-      url: req.originalUrl || req.url
+      url: redactUrl(req.originalUrl || req.url, (field) => activeLogger.isSensitiveField(field))
     });
 
     sendError(res, {

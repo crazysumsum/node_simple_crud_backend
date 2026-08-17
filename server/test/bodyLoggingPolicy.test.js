@@ -92,7 +92,8 @@ async function startApplication(t, { errorStatus } = {}) {
       info: async () => {},
       warn: async () => {},
       error: async () => {},
-      flush: async () => {}
+      flush: async () => {},
+      isSensitiveField: () => false
     },
     // 取代 request logger，直接收集 entry 而不落盤。
     requestLogger: await createCollectingRequestLogger(entries, errorStatus),
