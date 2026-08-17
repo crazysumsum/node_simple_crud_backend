@@ -160,6 +160,47 @@ test("a job that throws is logged and keeps its schedule", async () => {
   await scheduler.stop();
 });
 
+test("a job that throws synchronously, before any await, does not get stuck marked running forever", async () => {
+  // jobService() 的 work() 是 async，即使 run() 同步拋錯，呼叫端拿到的還是一個
+  // rejected promise——await 一定會先讓出一次微任務，不會踩到這裡要測的問題。
+  // 真正會觸發的是呼叫本身就同步拋錯：normalizeJobDefinition 把 job.run 接成
+  // 一個「不是」async 的箭頭函式（`(signal) => instance[method](signal)`），
+  // 所以 method 本身若不是 async、且在回傳任何 promise 之前就 throw，
+  // 這個例外會在 execute() 的 IIFE 第一次真正的 await 之前，同步冒出來。
+  const service = {
+    work() {
+      throw new Error("boom before any await");
+    }
+  };
+  service.constructor = {
+    jobs: Object.freeze([
+      { name: "demo.syncThrow", method: "work", intervalMs: 1000, timeoutMs: 500 }
+    ]),
+    name: "JobService"
+  };
+
+  const { scheduler, timers } = createScheduler({
+    jobs: { demo: service },
+    random: () => 0
+  });
+
+  await scheduler.start();
+  await timers.advance(800);
+
+  const stats = scheduler.stats.get("demo.syncThrow");
+  assert.equal(stats.consecutiveFailures, 1);
+  assert.equal(stats.skippedOverlapping, 0);
+
+  // 有 bug 的版本：running 的佔位在第一輪同步拋錯時就已經被清掉了（刪的是一筆
+  // 根本還沒寫入的 key），隨後才被永久寫入，從此再也沒有東西會刪掉它——第二輪
+  // 一律被當成「還在跑」而跳過，這個工作再也不會真正執行第二次。
+  await timers.advance(1000);
+  assert.equal(stats.consecutiveFailures, 2, "第二輪應該真的跑過，不是被當成重疊跳過");
+  assert.equal(stats.skippedOverlapping, 0);
+
+  await scheduler.stop();
+});
+
 test("a run still in progress causes the next tick to be skipped, not stacked", async () => {
   let release;
   const service = jobService(
