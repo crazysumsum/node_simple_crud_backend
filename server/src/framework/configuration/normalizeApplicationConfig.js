@@ -108,7 +108,8 @@ export function normalizeApplicationConfig(source) {
       source.connectionsCheckingIntervalMs,
       "connectionsCheckingIntervalMs"
     ),
-    shutdownTimeoutMs: integer(source.shutdownTimeoutMs, "shutdownTimeoutMs")
+    shutdownTimeoutMs: integer(source.shutdownTimeoutMs, "shutdownTimeoutMs"),
+    maxConnections: integer(source.maxConnections, "maxConnections")
   });
 
   checkTimeoutChain(config);
