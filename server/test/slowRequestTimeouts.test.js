@@ -435,7 +435,7 @@ test("the slow client is told why, and the log says how little it sent", async (
     socket.once("connect", resolve);
   });
   socket.write(
-    "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+    "POST /api/v1/echo?token=leaked HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
       "Content-Type: application/json\r\nContent-Length: 100000\r\n\r\n" +
       '{"a":"'
   );
