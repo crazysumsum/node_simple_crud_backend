@@ -235,6 +235,65 @@ test("a route timeout longer than the receive timeout fails startup", () => {
   );
 });
 
+test("createApplication honors an injected requestReceiveTimeoutMs, not the module's static default", async (t) => {
+  // 迴歸測試：createApplication 曾經在建立 dispatcher 之前自己呼叫一次
+  // validateApiConfig，卻沒有帶 requestReceiveTimeoutMs，於是退回
+  // apiDispatcher.js 模組載入時讀到的靜態預設（120000）。呼叫端注入的
+  // requestReceiveTimeoutMs 比那個靜態預設高時，一個其實合法的 route
+  // （130000，只超過靜態預設，沒超過注入值）會被那第一次驗證錯誤地擋下來，
+  // 永遠走不到後面用了正確設定值的 createApiDispatcher。
+  class LongRunningHandler extends BaseRequestHandler {
+    static handlerName = "longRunning";
+    static api = {
+      method: "POST",
+      path: "/api/v1/long-running",
+      description: "Only legal once requestReceiveTimeoutMs is actually raised.",
+      authType: "public",
+      authorizationPolicies: [{ name: "allowAll", options: {} }],
+      timeoutMs: 130000,
+      requestSchema: { body: { type: "object", additionalProperties: true } },
+      responseSchema: { 200: { type: "object", additionalProperties: true } }
+    };
+
+    async execute(req) {
+      return this.response({ echoed: req.input.body });
+    }
+  }
+
+  const source = defaultConfigurationSource();
+  const application = await createApplication({
+    configurationSource: {
+      ...source,
+      application: {
+        ...source.application,
+        port: 0,
+        shutdownTimeoutMs: 1000,
+        requestReceiveTimeoutMs: 150000
+      },
+      idempotency: { ...source.idempotency, storeAdapter: "memory" }
+    },
+    handlerRegistryOptions: {
+      moduleUrls: ["virtual:requestReceiveTimeoutRegression"],
+      moduleLoader: async () => ({ LongRunningHandler })
+    },
+    logger: {
+      debug: async () => {}, info: async () => {}, warn: async () => {},
+      error: async () => {}, flush: async () => {},
+      isSensitiveField: () => false
+    },
+    requestLogger: (_req, _res, next) => next(),
+    serviceOptions: { mysqldatabase: fakeDatabaseOptions() },
+    forceExit: () => {
+      throw new Error("must not force exit");
+    }
+  });
+  t.after(() => application.shutdown("test_cleanup"));
+
+  // 沒有在 createApplication() 這一步就丟出例外，代表 route 驗證用的是
+  // 真正注入的 requestReceiveTimeoutMs（150000），不是模組的靜態預設。
+  assert.equal(application.state, "created");
+});
+
 const wait = (ms) =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);

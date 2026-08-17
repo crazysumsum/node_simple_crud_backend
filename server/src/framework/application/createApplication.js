@@ -13,10 +13,7 @@ import {
 } from "../configuration/applicationConfiguration.js";
 import { createServiceContainer } from "../services/createServiceContainer.js";
 import { createRequestServiceScopeMiddleware } from "../services/requestServiceScope.js";
-import {
-  createApiDispatcher,
-  validateApiConfig
-} from "../middleware/apiDispatcher.js";
+import { createApiDispatcher } from "../middleware/apiDispatcher.js";
 import {
   bodyParsingComplete,
   createBodyReceiveTimeoutMiddleware
@@ -512,16 +509,12 @@ export async function createApplication({
         ? resolveApiDefinitions(activeHandlers, configuration.api.defaults)
         : routes;
 
-    validateApiConfig(
-      activeRoutes,
-      activeHandlers,
-      activeStrategies,
-      configuration.application.requestTimeoutMs,
-      activeAuthorizationPolicies,
-      configuration.api.versioning,
-      activeIdempotency
-    );
-
+    // createApiDispatcher 自己會用同一批 routes/handlers/strategies 呼叫
+    // validateApiConfig（見 apiDispatcher.js），不在這裡另外驗證一次——先前
+    // 這裡的呼叫沒有帶 requestReceiveTimeoutMs，會退回模組載入時的靜態預設，
+    // 跟下面實際餵給 dispatcher 的 configuration.application.requestReceiveTimeoutMs
+    // 不一定是同一個值：兩者不同時，起手這一次可能用錯的（通常較低的）上限
+    // 擋下一個其實合法的長逾時 route。
     const apiDispatcher = createApiDispatcher({
       routes: activeRoutes,
       handlers: activeHandlers,
