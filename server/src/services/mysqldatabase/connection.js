@@ -9,9 +9,15 @@ import { revealSecret } from "../../framework/configuration/SecretValue.js";
  * mysql.createPool 本身無法在單元測試裡呼叫，弄錯的話症狀是啟動時連不上資料庫。
  */
 export function mySqlPoolOptions(config) {
+  // 這四個都是框架自己讀的設定（見 applicationConfiguration.js 的預算檢查、
+  // MySqlDatabaseService.js 的 acquire watchdog 與逾時後 destroy/release 判斷），
+  // mysql2 不認得這些名字。留著會在連線建立時被 mysql2 當成無效選項印警告，
+  // 未來版本則會直接丟例外。
   const {
     queryTimeoutMs: _queryTimeoutMs,
     transactionTimeoutMs: _transactionTimeoutMs,
+    acquireTimeoutMs: _acquireTimeoutMs,
+    abandonedConnectionAction: _abandonedConnectionAction,
     ...poolConfig
   } = config;
 
