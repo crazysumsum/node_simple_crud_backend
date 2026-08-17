@@ -38,7 +38,7 @@ test("migrations directory files are named for a stable execution order", async 
 test("0001_add_idempotency_lease_owner adds the column when it's missing", async () => {
   const calls = [];
   const connection = {
-    query: async (sql, params) => {
+    query: async (sql) => {
       calls.push(sql);
       if (sql.includes("information_schema")) {
         return [[]];
@@ -56,7 +56,7 @@ test("0001_add_idempotency_lease_owner adds the column when it's missing", async
 test("0001_add_idempotency_lease_owner is a no-op once the column already exists", async () => {
   const calls = [];
   const connection = {
-    query: async (sql, params) => {
+    query: async (sql) => {
       calls.push(sql);
       return [[{ COLUMN_NAME: "lease_owner" }]];
     }
