@@ -61,7 +61,7 @@ test("the framework SQL files match the tables the code actually queries", async
   // ER_NO_SUCH_TABLE，那正是這個檢查要提前抓到的。
   assert.match(scheduler, /CREATE TABLE IF NOT EXISTS fr_job_leases/);
   assert.match(scheduler, /CREATE TABLE IF NOT EXISTS fr_job_stats/);
-  assert.match(jwt, /CREATE TABLE IF NOT EXISTS fr_token_revocations/);
+  assert.match(jwt, /CREATE TABLE IF NOT EXISTS fr_token_versions/);
 
   const leaseStoreSource = await readFile(
     fileURLToPath(new URL("../src/services/scheduler/JobLeaseStore.js", import.meta.url)),
@@ -80,7 +80,15 @@ test("the framework SQL files match the tables the code actually queries", async
 
   assert.equal(leaseStoreSource.includes("fr_job_leases"), true);
   assert.equal(statsStoreSource.includes("fr_job_stats"), true);
-  assert.equal(revocationSource.includes("fr_token_revocations"), true);
+  assert.equal(revocationSource.includes("fr_token_versions"), true);
+
+  // 舊的切線表換成版本表時，漏改任何一句 SQL 都只會在執行期炸出
+  // ER_NO_SUCH_TABLE——而且是在第一次撤銷時，不是啟動時。
+  assert.equal(
+    revocationSource.includes("fr_token_revocations"),
+    false,
+    "還有指向舊切線表的 SQL"
+  );
 
   // 改名漏掉一句 SQL 的話，那一句會在執行期才失敗——而 acquire()／release()
   // 只在 cluster 工作真的觸發時才跑，可能好幾小時後才發現。

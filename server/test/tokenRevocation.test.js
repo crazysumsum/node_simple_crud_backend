@@ -7,7 +7,7 @@ import { normalizeTokenRevocationConfig } from "../src/services/tokenRevocation/
 import { createTestTime } from "../test-support/createTestTime.js";
 
 // JWT 是自證的：簽章對、還沒過期就有效。撤銷是唯一能在到期前作廢它的機制，
-// 而它的每一個失效模式都是安靜的——快照沒更新、切線算錯一秒、清理刪早了，
+// 而它的每一個失效模式都是安靜的——快照沒更新、版本沒寫進 token、比較寫反了，
 // 症狀都是「已撤銷的 token 還能用」，不會有任何錯誤浮現。
 
 function collectingLogger() {
@@ -27,7 +27,7 @@ function collectingLogger() {
 
 /**
  * 只實作這個 service 真正用到的那幾句 SQL，讓判斷邏輯確實被執行到。
- * dbNowSeconds 與 time 刻意分開，才測得出「切線用的是哪個時鐘」。
+ * dbNowSeconds 與 time 刻意分開，才測得出時鐘偏差有沒有被量到。
  */
 function fakeDatabase({ rows = [], dbNowSeconds = 1_000_000, fail = null } = {}) {
   const state = { rows: [...rows], dbNowSeconds, queries: [] };
@@ -39,45 +39,39 @@ function fakeDatabase({ rows = [], dbNowSeconds = 1_000_000, fail = null } = {})
       throw fail;
     }
 
-    if (sql.includes("UNIX_TIMESTAMP() + 1 AS cutoff")) {
-      return [[{ cutoff: state.dbNowSeconds + 1 }]];
-    }
-
     if (sql.includes("UNIX_TIMESTAMP() AS db_now")) {
       return [[{ db_now: state.dbNowSeconds }]];
     }
 
-    if (sql.includes("SELECT subject, revoked_before")) {
+    if (sql.includes("SELECT version FROM")) {
+      const [subject] = params;
+      const row = state.rows.find((candidate) => candidate.subject === subject);
+      return [row ? [{ version: row.version }] : []];
+    }
+
+    if (sql.includes("SELECT subject, version")) {
       return [state.rows.map((row) => ({ ...row }))];
     }
 
-    if (sql.includes("INSERT INTO fr_token_revocations")) {
-      const [subject, revokedBefore, reason, updatedAt] = params;
+    if (sql.includes("INSERT INTO fr_token_versions")) {
+      const [subject, reason] = params;
       const existing = state.rows.find((row) => row.subject === subject);
 
       if (existing) {
-        // GREATEST：切線只能往後推。
-        existing.revoked_before = Math.max(existing.revoked_before, revokedBefore);
+        // version + 1 在資料庫端算，所以這裡也在「資料庫端」算。
+        existing.version += 1;
         existing.reason = reason;
-        existing.updated_at = updatedAt;
+        existing.updated_at = state.dbNowSeconds;
       } else {
         state.rows.push({
           subject,
-          revoked_before: revokedBefore,
+          version: 1,
           reason,
-          updated_at: updatedAt
+          updated_at: state.dbNowSeconds
         });
       }
 
       return [{ affectedRows: 1 }];
-    }
-
-    if (sql.includes("DELETE FROM fr_token_revocations")) {
-      const [retentionSeconds] = params;
-      const cutoff = state.dbNowSeconds - retentionSeconds;
-      const before = state.rows.length;
-      state.rows = state.rows.filter((row) => row.revoked_before >= cutoff);
-      return [{ affectedRows: before - state.rows.length }];
     }
 
     throw new Error(`Unexpected SQL: ${sql}`);
@@ -110,7 +104,7 @@ function createService({ database, time, logger = collectingLogger(), config } =
 
 test("the first load blocks startup, so no request is served before it finishes", async () => {
   const database = fakeDatabase({
-    rows: [{ subject: "42", revoked_before: 500 }]
+    rows: [{ subject: "42", version: 5 }]
   });
   const { service } = createService({ database });
 
@@ -120,7 +114,7 @@ test("the first load blocks startup, so no request is served before it finishes"
 
   await service.initialize();
 
-  assert.equal(service.snapshot.get("42"), 500);
+  assert.equal(service.snapshot.get("42"), 5);
 });
 
 test("a failed first load fails startup instead of serving an empty snapshot", async () => {
@@ -132,58 +126,104 @@ test("a failed first load fails startup instead of serving an empty snapshot", a
   await assert.rejects(() => service.initialize(), /database is unreachable/);
 });
 
-test("a token issued before the cutoff is revoked, one issued after is not", async () => {
+test("a token older than the current version is revoked, the current one is not", async () => {
   const database = fakeDatabase({
-    rows: [{ subject: "42", revoked_before: 1000 }]
+    rows: [{ subject: "42", version: 3 }]
   });
   const { service } = createService({ database });
   await service.initialize();
 
-  assert.equal(service.isRevoked({ sub: "42", iat: 999 }), true);
-  // 邊界：iat === 切線 代表在切線那一刻或之後簽發，仍然有效。
-  assert.equal(service.isRevoked({ sub: "42", iat: 1000 }), false);
-  assert.equal(service.isRevoked({ sub: "42", iat: 1001 }), false);
-  // 沒有被撤銷過的 subject 完全不受影響。
-  assert.equal(service.isRevoked({ sub: "99", iat: 1 }), false);
+  assert.equal(service.isRevoked({ sub: "42", ver: 2 }), true);
+  // 邊界：ver === 目前版本 就是最新簽的那一批，必須放行。
+  assert.equal(service.isRevoked({ sub: "42", ver: 3 }), false);
+  // 比目前版本還新：只可能是快照落後了一輪，那個 token 是有效的。反過來當成
+  // 已撤銷的話，撤銷的那一刻剛登入的人會被自己的新 token 鎖在外面。
+  assert.equal(service.isRevoked({ sub: "42", ver: 4 }), false);
+  // 沒有被撤銷過的 subject 沒有列，等同版本 0。
+  assert.equal(service.isRevoked({ sub: "99", ver: 0 }), false);
   // 沒有 sub 就沒有 key 可查。放行的話那個 token 對所有撤銷免疫，所以唯一
-  // fail closed 的答案是當作已撤銷——與下面 iat 缺失同一條規則。
-  assert.equal(service.isRevoked({ iat: 1 }), true);
-  assert.equal(service.isRevoked({ sub: "", iat: 1 }), true);
-  assert.equal(service.isRevoked({ sub: "   ", iat: 1 }), true);
+  // fail closed 的答案是當作已撤銷——與下面 ver 缺失同一條規則。
+  assert.equal(service.isRevoked({ ver: 3 }), true);
+  assert.equal(service.isRevoked({ sub: "", ver: 3 }), true);
+  assert.equal(service.isRevoked({ sub: "   ", ver: 3 }), true);
 });
 
-test("a token without iat is treated as revoked", async () => {
+test("a token without ver is treated as revoked", async () => {
   const database = fakeDatabase({
-    rows: [{ subject: "42", revoked_before: 1000 }]
+    rows: [{ subject: "42", version: 3 }]
   });
   const { service } = createService({ database });
   await service.initialize();
 
-  // jsonwebtoken 預設一定會帶 iat。少了它代表這個 token 是用 noTimestamp 簽的
-  // 或是手工造的——放行的話它會天然免疫於所有撤銷，正是攻擊者想要的那種。
+  // issue() 一定會帶 ver。少了它代表這個 token 是切線那一版簽的，或是拿著密鑰
+  // 手工造的——放行的話它會天然免疫於所有撤銷，正是攻擊者想要的那種。
+  //
+  // 這也是換掉切線之後唯一的相容性斷點：部署當下所有既存 token 一起失效。
   assert.equal(service.isRevoked({ sub: "42" }), true);
-  assert.equal(service.isRevoked({ sub: "42", iat: null }), true);
-  assert.equal(service.isRevoked({ sub: "42", iat: "1500" }), true);
+  assert.equal(service.isRevoked({ sub: "42", ver: null }), true);
+  assert.equal(service.isRevoked({ sub: "42", ver: "3" }), true);
+  assert.equal(service.isRevoked({ sub: "42", ver: 1.5 }), true);
+
+  // 從未撤銷過的人也一樣：沒有 ver 就是不合格的 token，跟有沒有被撤銷無關。
+  assert.equal(service.isRevoked({ sub: "99" }), true);
 });
 
 // --- 撤銷寫入 ----------------------------------------------------------------
 
-test("the cutoff comes from the database clock, not the local one", async () => {
+test("the first revocation takes a never-revoked subject from 0 to 1", async () => {
+  const database = fakeDatabase();
+  const { service } = createService({ database });
+  await service.initialize();
+
+  // 沒有列 = 版本 0，而簽發時拿到的也是 0，所以第一次撤銷就必須讓那些 token
+  // 失效。DEFAULT 1 與「沒有列等於 0」這兩件事要在這裡對得起來。
+  assert.equal(await service.currentVersion("42"), 0);
+  assert.equal(service.isRevoked({ sub: "42", ver: 0 }), false);
+
+  assert.equal(await service.revoke("42"), 1);
+  assert.equal(service.isRevoked({ sub: "42", ver: 0 }), true);
+});
+
+test("revocation takes effect locally without waiting for the next refresh", async () => {
+  const database = fakeDatabase({ rows: [{ subject: "42", version: 7 }] });
+  const { service } = createService({ database });
+  await service.initialize();
+
+  await service.revoke("42", { reason: "password changed" });
+
+  // 發起撤銷的那個實例不該還要等一輪刷新才認得自己剛寫下的東西。
+  assert.equal(service.isRevoked({ sub: "42", ver: 7 }), true);
+  assert.equal(service.snapshot.get("42"), 8);
+});
+
+test("the version only ever moves forward, whichever instance bumped it", async () => {
+  const database = fakeDatabase({ rows: [{ subject: "42", version: 4 }] });
+  const { service } = createService({ database });
+  await service.initialize();
+
+  // 另一個實例同時也撤銷了同一個人。加一是在資料庫端做的，所以兩次都算數
+  // ——在應用層讀出 4 再寫 5 的話，其中一次會被另一次蓋掉。
+  database.state.rows.find((row) => row.subject === "42").version = 6;
+  assert.equal(await service.revoke("42"), 7);
+  assert.equal(service.snapshot.get("42"), 7);
+
+  // 本機快照領先也不該退回去：版本號只往前，領先只代表多擋掉一些本來就該擋的。
+  service.snapshot.set("42", 9);
+  await service.revoke("42");
+  assert.equal(service.snapshot.get("42"), 9);
+});
+
+test("a clock that disagrees with the database is reported", async () => {
   const database = fakeDatabase({ dbNowSeconds: 5_000 });
   // 本機時鐘刻意超前資料庫 1000 秒，模擬未同步的機器。
   const time = createTestTime({ clock: () => new Date(6_000_000) });
   const { service, logger } = createService({ database, time });
+
   await service.initialize();
 
-  const cutoff = await service.revoke("42");
-
-  // 用本機時鐘的話會是 6001，一台機器上簽發的 token 就會逃過另一台的撤銷。
-  assert.equal(cutoff, 5_001);
-
-  // 切線用對時鐘只解決了寫入那一側：iat 仍然來自簽發節點自己的時鐘，所以偏差
-  // 依然會讓 iat < revokedBefore 的比較失守。這裡不去補償它（往切線加容忍值會
-  // 讓「改密碼後立刻重新登入」拿到一個一簽出來就無效的 token），但偏差必須在
-  // 造成失守之前先變成一則 error。
+  // 撤銷本身已經不看時鐘了，但 token 的 iat 與 exp 還是由簽發那台機器的時鐘
+  // 決定，而驗證只帶 clockToleranceSeconds 的容忍。快 1000 秒的機器簽出來的
+  // token 在每一台機器上都多活 1000 秒。
   const entry = logger.entries.find(
     ({ event }) => event === "auth.revocation.clock_skew"
   );
@@ -192,47 +232,19 @@ test("the cutoff comes from the database clock, not the local one", async () => 
   assert.equal(entry.context.maxClockSkewSeconds, 60);
 });
 
-test("the cutoff covers tokens issued in the same second", async () => {
-  const database = fakeDatabase({ dbNowSeconds: 5_000 });
-  const { service } = createService({ database });
-  await service.initialize();
-
-  await service.revoke("42");
-
-  // iat 只有秒精度。切線若等於當下這一秒，同一秒簽發的 token 會因為
-  // iat < revokedBefore 不成立而存活——所以切線必須是 now + 1。
-  assert.equal(service.isRevoked({ sub: "42", iat: 5_000 }), true);
-  assert.equal(service.isRevoked({ sub: "42", iat: 5_001 }), false);
-});
-
-test("revocation takes effect locally without waiting for the next refresh", async () => {
-  const database = fakeDatabase({ dbNowSeconds: 5_000 });
-  const { service } = createService({ database });
+test("the recorded revocation says which version it produced", async () => {
+  const database = fakeDatabase({ rows: [{ subject: "42", version: 2 }] });
+  const { service, logger } = createService({ database });
   await service.initialize();
 
   await service.revoke("42", { reason: "password changed" });
 
-  // 發起撤銷的那個實例不該還要等一輪刷新才認得自己剛寫下的東西。
-  assert.equal(service.isRevoked({ sub: "42", iat: 4_999 }), true);
-});
-
-test("a later cutoff wins and an earlier one cannot undo it", async () => {
-  const database = fakeDatabase({ dbNowSeconds: 5_000 });
-  const { service } = createService({ database });
-  await service.initialize();
-
-  await service.revoke("42");
-  assert.equal(service.snapshot.get("42"), 5_001);
-
-  // 另一個實例的時鐘落後，或一個遲到的請求——切線只能往後推，不能被蓋回去。
-  database.state.dbNowSeconds = 3_000;
-  await service.revoke("42");
-
-  assert.equal(service.snapshot.get("42"), 5_001);
-  assert.equal(
-    database.state.rows.find((row) => row.subject === "42").revoked_before,
-    5_001
+  const entry = logger.entries.find(
+    ({ event }) => event === "auth.revocation.recorded"
   );
+  assert.equal(entry.context.version, 3);
+  assert.equal(entry.context.subject, "42");
+  assert.equal(entry.context.reason, "password changed");
 });
 
 test("revoking without a subject is rejected", async () => {
@@ -251,7 +263,7 @@ test("a failed refresh keeps serving the old snapshot and says how stale it is",
   let nowMs = 1_000_000;
   const database = fakeDatabase({
     dbNowSeconds: nowMs / 1000,
-    rows: [{ subject: "42", revoked_before: 1000 }]
+    rows: [{ subject: "42", version: 3 }]
   });
   const time = createTestTime({ clock: () => new Date(nowMs) });
   const { service, logger } = createService({ database, time });
@@ -265,7 +277,7 @@ test("a failed refresh keeps serving the old snapshot and says how stale it is",
   assert.equal(await service.refresh(), false);
 
   // fail open：舊快照繼續服務。反過來會讓一次資料庫抖動變成全站登出。
-  assert.equal(service.isRevoked({ sub: "42", iat: 999 }), true);
+  assert.equal(service.isRevoked({ sub: "42", ver: 2 }), true);
 
   const entry = logger.entries.find(
     ({ event }) => event === "auth.revocation.refresh_failed"
@@ -279,7 +291,7 @@ test("a failed refresh keeps serving the old snapshot and says how stale it is",
 /**
  * 讓時間可以往前推的 service，用來測快照年齡相關的行為。
  */
-function stalableService({ config, rows = [{ subject: "42", revoked_before: 1000 }] } = {}) {
+function stalableService({ config, rows = [{ subject: "42", version: 3 }] } = {}) {
   let nowMs = 1_000_000;
   const database = fakeDatabase({ dbNowSeconds: nowMs / 1000, rows });
   const time = createTestTime({ clock: () => new Date(nowMs) });
@@ -319,7 +331,7 @@ test("fail open is time boxed: past the cap the snapshot stops counting", async 
   assert.equal(harness.service.snapshotUsable(), false);
 
   // 熔斷不動快照本身——切線還在，恢復之後不需要重建。
-  assert.equal(harness.service.isRevoked({ sub: "42", iat: 999 }), true);
+  assert.equal(harness.service.isRevoked({ sub: "42", ver: 2 }), true);
 });
 
 test("failureMode open restores the unbounded behaviour", async () => {
@@ -394,20 +406,20 @@ test("a successful refresh picks up another instance's revocation", async () => 
   const { service } = createService({ database });
   await service.initialize();
 
-  assert.equal(service.isRevoked({ sub: "42", iat: 1 }), false);
+  assert.equal(service.isRevoked({ sub: "42", ver: 0 }), false);
 
   // 另一個實例寫進了資料庫。
-  database.state.rows.push({ subject: "42", revoked_before: 9_999 });
+  database.state.rows.push({ subject: "42", version: 1 });
   assert.equal(await service.refresh(), true);
 
-  assert.equal(service.isRevoked({ sub: "42", iat: 9_998 }), true);
+  assert.equal(service.isRevoked({ sub: "42", ver: 0 }), true);
 });
 
 test("an oversized snapshot warns but still loads", async () => {
   const database = fakeDatabase({
     rows: [
-      { subject: "1", revoked_before: 10 },
-      { subject: "2", revoked_before: 20 }
+      { subject: "1", version: 1 },
+      { subject: "2", version: 2 }
     ]
   });
   const { service, logger } = createService({
@@ -425,27 +437,39 @@ test("an oversized snapshot warns but still loads", async () => {
   assert.equal(entry.level, "warn");
 });
 
-// --- 清理 --------------------------------------------------------------------
+// --- 簽發時要拿到的版本號 ----------------------------------------------------
 
-test("purge removes only cutoffs older than the retention window", async () => {
-  const retentionSeconds = 3600;
-  const database = fakeDatabase({
-    dbNowSeconds: 100_000,
-    rows: [
-      // 早於保留期：不可能還有活著的 token 早於它。
-      { subject: "old", revoked_before: 96_000 },
-      // 仍在保留期內：刪掉它會讓已撤銷的 token 復活。
-      { subject: "recent", revoked_before: 99_000 }
-    ]
-  });
-  const { service } = createService({ database, config: { retentionSeconds } });
+test("currentVersion reads the database, not the snapshot", async () => {
+  const database = fakeDatabase({ rows: [{ subject: "42", version: 4 }] });
+  const { service } = createService({ database });
   await service.initialize();
 
-  assert.equal(await service.purge(), 1);
-  assert.deepEqual(
-    database.state.rows.map(({ subject }) => subject),
-    ["recent"]
-  );
+  // 快照落後一輪：另一個實例已經撤銷過，這台還沒刷新。
+  database.state.rows.find((row) => row.subject === "42").version = 5;
+  assert.equal(service.snapshot.get("42"), 4);
+
+  // 讀快照的話會簽出 ver: 4 的 token，而它在下一次刷新之後立刻被自己的實例
+  // 判成已撤銷——使用者剛登入就被登出，而且沒有任何錯誤說得出為什麼。
+  assert.equal(await service.currentVersion("42"), 5);
+});
+
+test("a subject that was never revoked is version 0, not a missing value", async () => {
+  const database = fakeDatabase();
+  const { service } = createService({ database });
+  await service.initialize();
+
+  // undefined 或 null 傳進 issue() 會被擋下來（version 必須是整數），於是
+  // 「從未撤銷過的人登不進來」。0 讓它與 isRevoked() 的 ?? 0 對得起來。
+  assert.equal(await service.currentVersion("nobody"), 0);
+});
+
+test("currentVersion needs a subject, for the same reason revoke does", async () => {
+  const database = fakeDatabase();
+  const { service } = createService({ database });
+  await service.initialize();
+
+  await assert.rejects(() => service.currentVersion(""), /requires a subject/);
+  await assert.rejects(() => service.currentVersion(null), /requires a subject/);
 });
 
 // --- 設定 --------------------------------------------------------------------
@@ -456,14 +480,16 @@ test("the configuration rejects values that would silently weaken revocation", (
     /"maxStalenessSeconds" must be a positive integer/
   );
   assert.throws(
-    () => normalizeTokenRevocationConfig({ retentionSeconds: -1 }),
-    /"retentionSeconds" must be a positive integer/
+    () => normalizeTokenRevocationConfig({ maxCachedSubjects: -1 }),
+    /"maxCachedSubjects" must be a positive integer/
   );
   assert.throws(() => normalizeTokenRevocationConfig(null), /must be an object/);
 
   const defaults = normalizeTokenRevocationConfig({});
   assert.equal(defaults.maxStalenessSeconds, 60);
-  assert.equal(defaults.retentionSeconds, 604800);
+  // 版本表永久保留，所以沒有 retentionSeconds——那個設定連同「保留期蓋不過
+  // token 壽命就會讓已撤銷的 token 復活」的整個失效模式一起消失了。
+  assert.equal(Object.hasOwn(defaults, "retentionSeconds"), false);
   assert.equal(defaults.maxFailOpenSeconds, 300);
   assert.equal(defaults.maxClockSkewSeconds, 60);
   // 預設熔斷，跟啟動時的立場一致：首載失敗就是啟動失敗。
@@ -602,7 +628,7 @@ function strategyWith({
 
 test("a revoked token is rejected with the same opaque code as any other failure", async () => {
   const { strategy, req, logger } = strategyWith({
-    claims: { sub: "42", iat: 100 },
+    claims: { sub: "42", iat: 100, ver: 2 },
     isRevoked: () => true
   });
 
@@ -622,6 +648,9 @@ test("a revoked token is rejected with the same opaque code as any other failure
   assert.equal(entry.level, "warn");
   assert.equal(entry.context.subject, "42");
   assert.equal(entry.context.issuedAt, 100);
+  // 判定的依據要記下來。缺 ver 的 token 會記成 null，那是相容性斷點而不是
+  // 一次真的撤銷，兩者在排查時必須分得開。
+  assert.equal(entry.context.tokenVersion, 2);
   assert.equal(entry.context.snapshotAgeSeconds, 5);
 
   // 撤銷判定是最終結論，不該再被記成一次驗證失敗。

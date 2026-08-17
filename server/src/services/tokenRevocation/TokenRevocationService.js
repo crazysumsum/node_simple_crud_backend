@@ -2,7 +2,7 @@ import { BaseService } from "../../framework/services/BaseService.js";
 import { describeMissingTable } from "../mysqldatabase/missingTableError.js";
 import { normalizeTokenRevocationConfig } from "./normalizeTokenRevocationConfig.js";
 
-const TABLE = "fr_token_revocations";
+const TABLE = "fr_token_versions";
 const SQL_FILE = "server/database/framework/jwt.sql";
 
 /**
@@ -11,14 +11,24 @@ const SQL_FILE = "server/database/framework/jwt.sql";
  * JWT 是自證的：簽章對、還沒過期，就有效。要在到期前作廢它，唯一的辦法是在
  * 驗證之後加一道查詢——而那道查詢絕不能是每個請求打一次資料庫。
  *
- * 所以撤銷用「切線」表示：一個使用者一列，記下「這個時間點之前簽發的 token
- * 全部作廢」。整張表小到可以整份載入記憶體（一個使用者一列，不是一個 token
- * 一列），請求路徑只做一次 Map 查詢與一次數字比較。定時工作負責把快照刷新。
+ * 所以撤銷用「版本號」表示：一個使用者一列，記著一個單調遞增的計數器。token
+ * 帶著簽發當下的 ver，比目前版本舊就是已撤銷。整張表小到可以整份載入記憶體
+ * （一個使用者一列，不是一個 token 一列），請求路徑只做一次 Map 查詢與一次
+ * 數字比較。定時工作負責把快照刷新。
  *
- * 代價是撤銷有延遲上界，等於刷新間隔。那個上界是明碼寫出來的設定
- * （maxStalenessSeconds），而且啟動時會與實際的刷新間隔交叉檢查，不會變成一個
- * 只有讀原始碼才知道的數字。刷新失敗時舊快照還能撐多久，同樣是設定
- * （maxFailOpenSeconds），超過就熔斷——見 snapshotUsable()。
+ * 上一版用時間切線（「這個時間點之前簽發的全部作廢」）。換掉它是因為那等於
+ * 拿時間當版本號，於是每個毛病都跟時鐘有關：iat 取自簽發節點的時鐘而切線取自
+ * 資料庫時鐘，偏快的節點簽出的 token 逃得掉；切線只有秒精度所以要 +1 秒去蓋
+ * 同一秒；列刪得比 token 壽命早，已撤銷的 token 就會復活。計數器沒有這些問題
+ * ——ver < version 兩邊都不是時間——而且列永久保留，連清理工作都不需要。
+ *
+ * 代價是簽發時要知道版本號，也就是登入時多一次查詢（見 currentVersion()）。
+ * 登入本來就在打資料庫，而換到的是一整類無聲失效的消失。
+ *
+ * 撤銷仍然有延遲上界，等於刷新間隔——快照是每個實例自己的記憶體。那個上界是
+ * 明碼寫出來的設定（maxStalenessSeconds），啟動時會與實際的刷新間隔交叉檢查。
+ * 刷新失敗時舊快照還能撐多久，同樣是設定（maxFailOpenSeconds），超過就熔斷
+ * ——見 snapshotUsable()。
  *
  * 這個 service 只提供能力，不決定什麼時候撤銷。登出、強制下線、改密碼這些
  * 觸發點屬於業務 handler，注入它並呼叫 revoke() 即可。
@@ -38,8 +48,8 @@ export class TokenRevocationService extends BaseService {
     this.logger = services.require("logging").logger;
     this.time = services.require("time");
 
-    // subject -> 切線（UNIX 秒）。空 Map 代表「沒有人被撤銷」，而不是「還沒
-    // 載入」——後者由 loadedAtMs 為 null 表示，兩者必須分得開。
+    // subject -> 目前版本號。空 Map 代表「沒有人被撤銷」，而不是「還沒載入」
+    // ——後者由 loadedAtMs 為 null 表示，兩者必須分得開。
     this.snapshot = new Map();
     this.loadedAtMs = null;
     this.lastFailureAtMs = null;
@@ -68,26 +78,51 @@ export class TokenRevocationService extends BaseService {
       return true;
     }
 
-    const revokedBefore = this.snapshot.get(subject);
+    const version = claims?.ver;
 
-    if (revokedBefore === undefined) {
-      return false;
-    }
-
-    const issuedAt = claims?.iat;
-
-    // iat 缺失的 token 無從與切線比較。jsonwebtoken 預設一定會帶 iat，所以少了
-    // 它代表這個 token 是用 noTimestamp 簽的或是手工造的。放行的話它會天然免疫
-    // 於所有撤銷——這正是攻擊者想要的那種 token。
-    if (!Number.isFinite(issuedAt)) {
+    // ver 缺失的 token 無從與版本號比較。issue() 一定會帶它，所以少了它代表這個
+    // token 是舊版簽的或是手工造的。放行的話它會天然免疫於所有撤銷——這正是
+    // 攻擊者想要的那種 token，所以 fail closed。
+    //
+    // 這也是換掉切線之後唯一的相容性斷點：部署當下所有既存 token 一起失效。
+    if (!Number.isInteger(version)) {
       return true;
     }
 
-    return issuedAt < revokedBefore;
+    // 沒有列代表從未撤銷過，等同版本 0——與 DEFAULT 1 的第一次撤銷銜接得上。
+    return version < (this.snapshot.get(subject) ?? 0);
   }
 
   /**
-   * 撤銷一個 subject 在此刻之前簽發的所有 token。
+   * 這個 subject 目前的版本號。簽發時要把它放進 token 的 ver。
+   *
+   * 讀資料庫而不是讀快照：快照可以落後 maxStalenessSeconds，用它簽出來的 token
+   * 會在下一次刷新時被自己的實例判成過期。登入不是熱路徑，而且本來就在打資料
+   * 庫，多這一次查詢換到的是「剛簽的 token 一定是有效的」。
+   */
+  async currentVersion(subject) {
+    const key = String(subject ?? "").trim();
+
+    if (!key) {
+      throw new TypeError("Token revocation requires a subject");
+    }
+
+    let rows;
+
+    try {
+      [rows] = await this.database.query(
+        `SELECT version FROM ${TABLE} WHERE subject = ?`,
+        [key]
+      );
+    } catch (error) {
+      throw describeMissingTable(error, { table: TABLE, sqlFile: SQL_FILE });
+    }
+
+    return rows.length === 0 ? 0 : Number(rows[0].version);
+  }
+
+  /**
+   * 撤銷一個 subject 目前已經簽出去的所有 token。
    */
   async revoke(subject, { reason = "" } = {}) {
     const key = String(subject ?? "").trim();
@@ -96,37 +131,32 @@ export class TokenRevocationService extends BaseService {
       throw new TypeError("Token revocation requires a subject");
     }
 
-    // 切線取自資料庫時鐘而不是本機時鐘：多實例的機器時鐘不保證同步，用本機
-    // 時間會讓一台機器上簽發的 token 逃過另一台機器發起的撤銷。
-    //
-    // +1 秒是為了蓋掉同一秒簽發的 token。iat 只有秒精度，切線若正好等於當下
-    // 這一秒，同一秒內簽發的 token 會因為 iat < revokedBefore 不成立而存活。
-    const [rows] = await this.database.query(
-      "SELECT UNIX_TIMESTAMP() + 1 AS cutoff"
-    );
-    const cutoff = Number(rows[0].cutoff);
-
+    // version + 1 在資料庫裡算，不在這裡算：兩個實例同時撤銷同一個人時，各自
+    // 讀到的舊值會是同一個，在應用層加一會讓其中一次撤銷被另一次蓋掉。交給
+    // MySQL 做就是原子的，而且完全不牽涉任何一邊的時鐘。
     await this.database.execute(
-      `INSERT INTO ${TABLE} (subject, revoked_before, reason, updated_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO ${TABLE} (subject, version, reason, updated_at)
+       VALUES (?, 1, ?, UNIX_TIMESTAMP())
        ON DUPLICATE KEY UPDATE
-         revoked_before = GREATEST(revoked_before, VALUES(revoked_before)),
+         version = version + 1,
          reason = VALUES(reason),
          updated_at = VALUES(updated_at)`,
-      [key, cutoff, String(reason).slice(0, 190), cutoff]
+      [key, String(reason).slice(0, 190)]
     );
 
-    // GREATEST 保證資料庫端的切線只會往後推。本機快照要照同一條規則更新，
-    // 否則兩個實例同時撤銷時，較舊的那個切線會在本機蓋掉較新的。
-    this.snapshot.set(key, Math.max(this.snapshot.get(key) ?? 0, cutoff));
+    const version = await this.currentVersion(key);
+
+    // 讀回來的值可能比這次寫的還新（別的實例也剛撤銷過）。那沒關係，也不該退
+    // 回去：版本號只會往前，本機快照領先只代表多擋掉一些本來就要被擋的 token。
+    this.snapshot.set(key, Math.max(this.snapshot.get(key) ?? 0, version));
 
     await this.logger.info(
       "auth.revocation.recorded",
-      "Tokens issued before the cutoff were revoked",
-      { subject: key, revokedBefore: cutoff, reason: String(reason) }
+      "The subject's token version was bumped; every token issued before it is now invalid",
+      { subject: key, version, reason: String(reason) }
     );
 
-    return cutoff;
+    return version;
   }
 
   /**
@@ -184,8 +214,8 @@ export class TokenRevocationService extends BaseService {
   /**
    * 快照是否還在可信範圍內。false 代表撤銷判斷已經不能當數。
    *
-   * isRevoked() 刻意不看年齡——它回答的是「這條切線怎麼說」，那是一個純粹的
-   * 比較。快照本身還算不算數是另一個問題，答錯的後果也不同（一個是放行錯的
+   * isRevoked() 刻意不看年齡——它回答的是「這個版本號算不算舊」，那是一個純粹
+   * 的比較。快照本身還算不算數是另一個問題，答錯的後果也不同（一個是放行錯的
    * 人，一個是整批人進不來），所以分成兩個問題問。
    */
   snapshotUsable() {
@@ -209,43 +239,16 @@ export class TokenRevocationService extends BaseService {
     return Math.max(0, Math.round((this.time.nowMs() - this.loadedAtMs) / 1000));
   }
 
-  /** 刪除早已無意義的切線。由 TokenRevocationPurgeJob 以 cluster scope 排程。 */
-  async purge() {
-    const [result] = await this.database.execute(
-      `DELETE FROM ${TABLE}
-       WHERE revoked_before < UNIX_TIMESTAMP() - ?`,
-      [this.revocationConfig.retentionSeconds]
-    );
-    const removedSubjects = Number(result?.affectedRows ?? 0);
-
-    if (removedSubjects > 0) {
-      await this.logger.info(
-        "auth.revocation.purged",
-        "Expired token revocation rows were removed",
-        {
-          removedSubjects,
-          retentionSeconds: this.revocationConfig.retentionSeconds
-        }
-      );
-    }
-
-    return removedSubjects;
-  }
-
   /**
    * 本機時鐘與資料庫時鐘差多少。
    *
-   * 切線取自資料庫時鐘，token 的 iat 取自簽發那台機器的時鐘。兩者不同步時，
-   * 時鐘偏快的節點簽出來的 token 帶著未來的 iat，逃過 iat < revokedBefore 的
-   * 比較——撤銷靜默失守，沒有任何錯誤，日誌上什麼都看不到。
+   * 撤銷本身已經不看時鐘了——版本號的比較兩邊都不是時間。但 token 的 iat 與
+   * exp 仍然由簽發那台機器的時鐘決定，而驗證是在另一台機器上、只帶
+   * clockToleranceSeconds（預設 5 秒）的容忍。一台快五分鐘的機器簽出來的
+   * token，在每一台機器上都多活五分鐘；慢的那台簽出來的則會被提早當成過期。
    *
-   * 這裡刻意只量測與記錄，不去補償：往切線或往比較加容忍值會過度撤銷，讓
-   * 「改密碼後立刻重新登入」拿到一個一簽出來就無效的 token。真正的修法是讓
-   * iat 也取自資料庫時鐘，或改用不看時鐘的版本號；在那之前，至少要讓偏差在
-   * 它造成失守之前先變成一則 error。
-   *
-   * 量到的偏差同時是 retentionSeconds 那條啟動檢查所假設的邊界——這則日誌就是
-   * 在持續驗證那個假設還成不成立。
+   * 這是唯一還有機器在管的共用時鐘，所以順手在刷新時量一次。只量測與記錄，
+   * 不補償：時鐘該由 NTP 修，不該由應用層猜著補。
    */
   async #reportClockSkew(dbNowSeconds) {
     const skewSeconds = Math.round(this.time.nowMs() / 1000) - dbNowSeconds;
@@ -256,7 +259,7 @@ export class TokenRevocationService extends BaseService {
 
     await this.logger.error(
       "auth.revocation.clock_skew",
-      "This node's clock disagrees with the database clock; revocation cut-lines may be bypassed",
+      "This node's clock disagrees with the database clock; token lifetimes will be wrong by that much",
       {
         skewSeconds,
         maxClockSkewSeconds: this.revocationConfig.maxClockSkewSeconds
@@ -273,9 +276,7 @@ export class TokenRevocationService extends BaseService {
       // 讓「表不見了」與「時鐘讀不到」在錯誤訊息上分不開。刷新間隔是 30 秒，
       // 多一次 SELECT UNIX_TIMESTAMP() 的成本可以忽略。
       [clockRows] = await this.database.query("SELECT UNIX_TIMESTAMP() AS db_now");
-      [rows] = await this.database.query(
-        `SELECT subject, revoked_before FROM ${TABLE}`
-      );
+      [rows] = await this.database.query(`SELECT subject, version FROM ${TABLE}`);
     } catch (error) {
       throw describeMissingTable(error, { table: TABLE, sqlFile: SQL_FILE });
     }
@@ -285,7 +286,7 @@ export class TokenRevocationService extends BaseService {
     const snapshot = new Map();
 
     for (const row of rows) {
-      snapshot.set(String(row.subject), Number(row.revoked_before));
+      snapshot.set(String(row.subject), Number(row.version));
     }
 
     if (snapshot.size > this.revocationConfig.maxCachedSubjects) {

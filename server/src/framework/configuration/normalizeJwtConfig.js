@@ -6,16 +6,15 @@ const DURATION_PATTERN = /^(\d+)(s|m|h|d|w)$/;
 const UNIT_SECONDS = Object.freeze({ s: 1, m: 60, h: 3600, d: 86400, w: 604800 });
 
 /**
- * 把 expiresIn 解析成秒。
+ * expiresIn 必須是一個看得懂的時長。
  *
- * 兩個理由。第一，jsonwebtoken 收到字串時一律交給 ms()，而 ms("3600") 是 3600
- * 毫秒不是 3600 秒——JWT_EXPIRES_IN=3600 會簽出 3 秒壽命的 token，而且沒有任何
- * 地方會說出來。第二，token 壽命與撤銷保留期的關係要在啟動時檢查，那需要一個
- * 數字，不是一個等到第一次登入才被解析的字串。
+ * jsonwebtoken 收到字串時一律交給 ms()，而 ms("3600") 是 3600 毫秒不是 3600
+ * 秒——JWT_EXPIRES_IN=3600 會簽出 3 秒壽命的 token，而且沒有任何地方會說出來。
+ * "banana" 則是通過全部啟動驗證，等到第一次有人登入才爆。
  *
- * 只接受帶單位的整數：ms() 還吃 "1.5h"、"2 hours"、"1y" 這些寫法，但我們算出來
- * 的秒數與 jsonwebtoken 算出來的一旦分岔，跨檔檢查就是在檢查一個假的數字。收窄
- * 到能逐一比對過的那個子集，比多支援幾種寫法值得。
+ * 只接受帶單位的整數。ms() 還吃 "1.5h"、"2 hours"、"1y"，但那些寫法我們沒有
+ * 逐一比對過，而一個「看起來像設定值、實際算出來是別的數字」的東西正是這裡要
+ * 擋的。收窄到驗證過的子集，比多支援幾種寫法值得。
  */
 function durationSeconds(value, key) {
   const match = DURATION_PATTERN.exec(String(value ?? "").trim());
@@ -59,6 +58,11 @@ export function normalizeJwtConfig(source) {
 
   const algorithm = requiredText(source?.algorithm, "algorithm");
   const clockToleranceSeconds = Number(source?.clockToleranceSeconds);
+  const expiresIn = requiredText(source?.expiresIn, "expiresIn");
+
+  // 解析出來的秒數刻意不留下來：撤銷改用版本號之後，已經沒有任何跨檔檢查需要
+  // 它了。這裡呼叫它純粹是為了驗證格式，原字串照樣交給 jwt.sign() 自己解析。
+  durationSeconds(expiresIn, "expiresIn");
 
   if (secret.length < 32) {
     throw new Error("JWT config secret must contain at least 32 characters");
@@ -80,10 +84,7 @@ export function normalizeJwtConfig(source) {
     issuer: requiredText(source?.issuer, "issuer"),
     audience: requiredText(source?.audience, "audience"),
     algorithm,
-    // 原字串給 jwt.sign()，秒數給啟動時的跨檔檢查。兩者由同一次解析產生，不會
-    // 出現「設定寫的是一回事、檢查算的是另一回事」。
-    expiresIn: requiredText(source?.expiresIn, "expiresIn"),
-    expiresInSeconds: durationSeconds(source?.expiresIn, "expiresIn"),
+    expiresIn,
     clockToleranceSeconds,
     headerName: requiredText(source?.headerName, "headerName").toLowerCase(),
     authScheme: requiredText(source?.authScheme, "authScheme")

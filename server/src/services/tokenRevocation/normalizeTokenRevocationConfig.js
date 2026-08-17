@@ -67,10 +67,6 @@ export function normalizeTokenRevocationConfig(source) {
       source.maxClockSkewSeconds ?? 60,
       "maxClockSkewSeconds"
     ),
-    retentionSeconds: positiveInteger(
-      source.retentionSeconds ?? 7 * 24 * 60 * 60,
-      "retentionSeconds"
-    ),
     maxCachedSubjects: positiveInteger(
       source.maxCachedSubjects ?? 100000,
       "maxCachedSubjects"

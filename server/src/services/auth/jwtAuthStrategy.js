@@ -51,6 +51,10 @@ export class JwtAuthStrategy extends BaseAuthStrategy {
           requestId: req.requestId || null,
           subject: claims.sub ?? null,
           issuedAt: claims.iat ?? null,
+          // 判定的依據。缺 ver 的 token 也走這條路（部署切換前簽的、或手工造
+          // 的），而 null 與一個落後的數字要分得出來——前者是相容性，後者是
+          // 真的被撤銷了。
+          tokenVersion: claims.ver ?? null,
           snapshotAgeSeconds: this.tokenRevocation.snapshotAgeSeconds()
         });
         throw new AuthenticationError("JWT_INVALID", "JWT is invalid or expired");

@@ -56,7 +56,10 @@ const strategyContainer = await createServiceContainer({
   options: {}
 });
 const jwtService = strategyContainer.require("jwt");
-const issueAccessToken = (payload, options) => jwtService.issue(payload, options);
+// 每個 token 都得帶簽發當下的撤銷版本號，否則 isRevoked() 會把它當成撤銷不掉
+// 的 token 擋下來。這些測試沒有撤銷過任何人，所以一律是 0。
+const issueAccessToken = (payload, options) =>
+  jwtService.issue(payload, { version: 0, ...options });
 const defaultAuthStrategies = createAuthStrategyRegistry({
   services: strategyContainer,
   logger: silentLogger
