@@ -472,6 +472,28 @@ test("currentVersion needs a subject, for the same reason revoke does", async ()
   await assert.rejects(() => service.currentVersion(null), /requires a subject/);
 });
 
+test("a missing table says which SQL file creates it, even when found via currentVersion", async () => {
+  // load() 有這條路徑的測試，但 currentVersion() 是第二個打這張表的入口，同一段
+  // catch 邏輯換了一個呼叫路徑，缺表的錯誤訊息不能只在其中一條路上是可讀的
+  // ——登入這條路遠比刷新常走，缺表時第一個看到爛錯誤訊息的地方很可能是這裡。
+  const database = fakeDatabase();
+  const { service } = createService({ database });
+  await service.initialize();
+
+  database.query = async () => {
+    throw Object.assign(new Error("MySQL database execute failed"), {
+      cause: Object.assign(new Error("Table 'erp_dev.fr_token_versions' doesn't exist"), {
+        code: "ER_NO_SUCH_TABLE"
+      })
+    });
+  };
+
+  await assert.rejects(
+    () => service.currentVersion("42"),
+    /Table "fr_token_versions" does not exist\. Run server\/database\/framework\/jwt\.sql/
+  );
+});
+
 // --- 設定 --------------------------------------------------------------------
 
 test("the configuration rejects values that would silently weaken revocation", () => {
