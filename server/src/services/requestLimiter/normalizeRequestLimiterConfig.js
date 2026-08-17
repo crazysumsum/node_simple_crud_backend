@@ -20,6 +20,18 @@ function nonNegativeInteger(value, key) {
   return number;
 }
 
+function storeFailureMode(value) {
+  const mode = String(value ?? "closed").trim();
+
+  if (mode !== "open" && mode !== "closed") {
+    throw new Error(
+      'Request limiter config "storeFailureMode" must be "open" or "closed"'
+    );
+  }
+
+  return mode;
+}
+
 function ipv6PrefixLength(value) {
   const bits = Number(value);
 
@@ -96,6 +108,11 @@ export function normalizeRequestLimiterConfig(source) {
       source.abandonGraceMs ?? 1000,
       "abandonGraceMs"
     ),
-    ipv6PrefixLength: ipv6PrefixLength(source.ipv6PrefixLength ?? 64)
+    ipv6PrefixLength: ipv6PrefixLength(source.ipv6PrefixLength ?? 64),
+    storeOperationTimeoutMs: positiveInteger(
+      source.storeOperationTimeoutMs ?? 500,
+      "storeOperationTimeoutMs"
+    ),
+    storeFailureMode: storeFailureMode(source.storeFailureMode)
   });
 }

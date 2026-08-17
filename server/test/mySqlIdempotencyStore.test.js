@@ -6,7 +6,7 @@ import { createTestTime } from "../test-support/createTestTime.js";
 // 這個 adapter 的存在理由只有一個：多實例部署下同一個 key 只能執行一次。互斥
 // 靠主鍵，所以假資料庫必須真的模擬主鍵衝突，否則測試會通過而叢集會重複執行。
 
-const OPTIONS = { fingerprint: "fp-1", ttlMs: 60000, pendingLeaseMs: 5000 };
+const OPTIONS = { fingerprint: "fp-1", ttlMs: 60000, pendingLeaseMs: 5000, owner: "owner-1" };
 
 function duplicateKeyError() {
   return Object.assign(new Error("MySQL database execute failed"), {
@@ -32,7 +32,7 @@ function fakeDatabase({ dbNowSeconds = 1000 } = {}) {
     state.statements.push(text);
 
     if (text.startsWith("INSERT INTO fr_idempotency_keys")) {
-      const [store_key, fingerprint, leaseSeconds] = params;
+      const [store_key, fingerprint, lease_owner, leaseSeconds] = params;
 
       // 主鍵約束：已存在就衝突，不管過期沒有——過期的列仍然佔著主鍵。
       if (rows.has(store_key)) {
@@ -43,6 +43,7 @@ function fakeDatabase({ dbNowSeconds = 1000 } = {}) {
         store_key,
         fingerprint,
         state: "pending",
+        lease_owner,
         status_code: null,
         response: null,
         expires_at: state.dbNowSeconds + leaseSeconds
@@ -76,11 +77,18 @@ function fakeDatabase({ dbNowSeconds = 1000 } = {}) {
       text.startsWith("DELETE FROM fr_idempotency_keys WHERE store_key = ?") &&
       !text.includes("expires_at")
     ) {
-      const row = rows.get(params[0]);
+      const guardsOwner = text.includes("lease_owner = ?");
+      const store_key = params[0];
+      const ownerParam = guardsOwner ? params[1] : undefined;
+      const row = rows.get(store_key);
       const guardsPending = text.includes("state = 'pending'");
 
-      if (row && (!guardsPending || row.state === "pending")) {
-        rows.delete(params[0]);
+      if (
+        row &&
+        (!guardsPending || row.state === "pending") &&
+        (!guardsOwner || row.lease_owner === ownerParam)
+      ) {
+        rows.delete(store_key);
         return [{ affectedRows: 1 }];
       }
 
@@ -92,15 +100,21 @@ function fakeDatabase({ dbNowSeconds = 1000 } = {}) {
       // markUnavailable() 都走這個分支，寫死的話後者會被當成前者，測試就看不出
       // 兩者的差別。
       const targetState = text.match(/SET state = '(\w+)'/)[1];
-      const store_key = params.at(-1);
+      const guardsOwner = text.includes("lease_owner = ?");
+      const store_key = guardsOwner ? params.at(-2) : params.at(-1);
+      const ownerParam = guardsOwner ? params.at(-1) : undefined;
       const row = rows.get(store_key);
       const guardsPending = text.includes("state = 'pending'");
 
-      if (!row || (guardsPending && row.state !== "pending")) {
+      if (
+        !row ||
+        (guardsPending && row.state !== "pending") ||
+        (guardsOwner && row.lease_owner !== ownerParam)
+      ) {
         return [{ affectedRows: 0 }];
       }
 
-      const ttlSeconds = params.at(-2);
+      const ttlSeconds = guardsOwner ? params.at(-3) : params.at(-2);
       Object.assign(row, {
         state: targetState,
         // 跟其他分支同一個原則：只有 SQL 真的寫了才套用。
@@ -188,7 +202,7 @@ test("a completed key replays its stored response", async () => {
   const { store } = createStore();
 
   await store.begin("k", OPTIONS);
-  await store.complete("k", { statusCode: 201, body: { id: 7 } }, { ttlMs: 60000 });
+  await store.complete("k", { statusCode: 201, body: { id: 7 } }, { ttlMs: 60000, owner: OPTIONS.owner });
 
   assert.deepEqual(await store.begin("k", OPTIONS), {
     state: "replay",
@@ -196,22 +210,72 @@ test("a completed key replays its stored response", async () => {
   });
 });
 
-test("completing after losing the lease does not overwrite the new owner", async () => {
+test("a stale owner's complete() is rejected, even while the row is still pending", async () => {
+  // 這是租約易主真正會發生的順序：接手者還沒 complete，原持有者的晚到寫入
+  // 就先到了。state='pending' 這個條件單獨擋不住它——那一刻兩邊看到的
+  // state 都是 pending，唯一能分辨「這是誰的租約」的只有 lease_owner。
   const { store, database } = createStore();
 
-  await store.begin("k", OPTIONS);
-  // 租約到期，另一個實例接手並完成。
+  await store.begin("k", { ...OPTIONS, owner: "owner-A" });
+  // 租約到期，另一個實例接手，但還沒來得及 complete。
   database.state.dbNowSeconds += 10;
-  await store.begin("k", OPTIONS);
-  await store.complete("k", { statusCode: 201, body: { owner: "second" } }, { ttlMs: 60000 });
+  await store.begin("k", { ...OPTIONS, owner: "owner-B" });
 
-  // 原持有者這時才回來寫入。state='pending' 的條件讓它影響 0 列。
-  await store.complete("k", { statusCode: 201, body: { owner: "first" } }, { ttlMs: 60000 });
+  // A 這時才回來寫入——沒有 owner 比對的話這裡會成功並覆寫 B 的列。
+  const staleWrite = await store.complete(
+    "k",
+    { statusCode: 201, body: { from: "A" } },
+    { ttlMs: 60000, owner: "owner-A" }
+  );
+  assert.equal(staleWrite, false, "owner 對不上，寫入不該套用");
+  assert.equal(database.rows.get("k").state, "pending", "B 的列不該被 A 的晚到寫入改動");
 
-  assert.deepEqual(await store.begin("k", OPTIONS), {
+  // B 自己完成，這次 owner 對得上。
+  const ownWrite = await store.complete(
+    "k",
+    { statusCode: 201, body: { from: "B" } },
+    { ttlMs: 60000, owner: "owner-B" }
+  );
+  assert.equal(ownWrite, true);
+
+  assert.deepEqual(await store.begin("k", { ...OPTIONS, owner: "owner-C" }), {
     state: "replay",
-    response: { statusCode: 201, body: { owner: "second" } }
+    response: { statusCode: 201, body: { from: "B" } }
   });
+});
+
+test("a stale owner's fail() does not release a lease it no longer holds", async () => {
+  // 對應報告裡最容易踩到的那條路：逾時的 handler 拿到 504，504 不在
+  // cacheableStatusCodes 裡，所以晚到的清理動作走的是 fail()，不是 complete()。
+  // fail() 若不比對 owner，會把接手者仍在使用的租約整列刪掉，讓第三個呼叫者
+  // 也搶到同一個 key，跟 B 同時執行同一件工作。
+  const { store, database } = createStore();
+
+  await store.begin("k", { ...OPTIONS, owner: "owner-A" });
+  database.state.dbNowSeconds += 10;
+  await store.begin("k", { ...OPTIONS, owner: "owner-B" });
+
+  const released = await store.fail("k", "owner-A");
+  assert.equal(released, false, "owner 對不上，不該釋放");
+  assert.ok(database.rows.has("k"), "B 的租約必須還在");
+  assert.equal(database.rows.get("k").lease_owner, "owner-B");
+
+  // C 這時候搶同一個 key，必須看到 inProgress，而不是又搶到一次。
+  assert.deepEqual(await store.begin("k", { ...OPTIONS, owner: "owner-C" }), {
+    state: "inProgress"
+  });
+});
+
+test("a stale owner's markUnavailable() does not lock a lease it no longer holds", async () => {
+  const { store, database } = createStore();
+
+  await store.begin("k", { ...OPTIONS, owner: "owner-A" });
+  database.state.dbNowSeconds += 10;
+  await store.begin("k", { ...OPTIONS, owner: "owner-B" });
+
+  const applied = await store.markUnavailable("k", { ttlMs: 60000, owner: "owner-A" });
+  assert.equal(applied, false, "owner 對不上，不該套用");
+  assert.equal(database.rows.get("k").state, "pending", "B 的租約不該被鎖成 unavailable");
 });
 
 // --- 租約與過期 --------------------------------------------------------------
@@ -233,7 +297,7 @@ test("an expired completed record is not replayed", async () => {
   const { store, database } = createStore();
 
   await store.begin("k", OPTIONS);
-  await store.complete("k", { statusCode: 201, body: { id: 1 } }, { ttlMs: 60000 });
+  await store.complete("k", { statusCode: 201, body: { id: 1 } }, { ttlMs: 60000, owner: OPTIONS.owner });
 
   database.state.dbNowSeconds += 61;
 
@@ -244,10 +308,10 @@ test("an expired completed record is not replayed", async () => {
 test("the pending lease is used for begin, and the full ttl only after completion", async () => {
   const { store, database } = createStore();
 
-  await store.begin("k", { fingerprint: "fp-1", ttlMs: 600000, pendingLeaseMs: 5000 });
+  await store.begin("k", { fingerprint: "fp-1", ttlMs: 600000, pendingLeaseMs: 5000, owner: "o" });
   assert.equal(database.rows.get("k").expires_at, database.state.dbNowSeconds + 5);
 
-  await store.complete("k", { statusCode: 200, body: {} }, { ttlMs: 600000 });
+  await store.complete("k", { statusCode: 200, body: {} }, { ttlMs: 600000, owner: "o" });
   assert.equal(database.rows.get("k").expires_at, database.state.dbNowSeconds + 600);
 });
 
@@ -257,12 +321,12 @@ test("failing a key releases it, but never deletes a completed record", async ()
   const { store } = createStore();
 
   await store.begin("k", OPTIONS);
-  await store.fail("k");
+  await store.fail("k", OPTIONS.owner);
   assert.deepEqual(await store.begin("k", OPTIONS), { state: "started" });
 
-  await store.complete("k", { statusCode: 200, body: { id: 1 } }, { ttlMs: 60000 });
+  await store.complete("k", { statusCode: 200, body: { id: 1 } }, { ttlMs: 60000, owner: OPTIONS.owner });
   // 一次晚到的釋放不能把一個還能重播的回應刪掉。
-  await store.fail("k");
+  await store.fail("k", OPTIONS.owner);
   assert.deepEqual(await store.begin("k", OPTIONS), {
     state: "replay",
     response: { statusCode: 200, body: { id: 1 } }
@@ -277,7 +341,11 @@ test("an oversized response is refused without touching the row", async () => {
   await store.begin("k", OPTIONS);
   await assert.rejects(
     () =>
-      store.complete("k", { statusCode: 200, body: { blob: "x".repeat(500) } }, { ttlMs: 60000 }),
+      store.complete(
+        "k",
+        { statusCode: 200, body: { blob: "x".repeat(500) } },
+        { ttlMs: 60000, owner: OPTIONS.owner }
+      ),
     /over the 64 byte limit/
   );
 
@@ -291,7 +359,7 @@ test("marking a key unavailable stops a retry from executing it again", async ()
   const { store, database } = createStore();
 
   await store.begin("k", OPTIONS);
-  await store.markUnavailable("k", { ttlMs: 60000 });
+  await store.markUnavailable("k", { ttlMs: 60000, owner: OPTIONS.owner });
 
   const row = database.rows.get("k");
   assert.equal(row.state, "unavailable");
@@ -309,7 +377,7 @@ test("marking unavailable uses the full ttl, not the pending lease", async () =>
 
   await store.begin("k", { ...OPTIONS, ttlMs: 3_600_000, pendingLeaseMs: 5000 });
   const leaseExpiry = database.rows.get("k").expires_at;
-  await store.markUnavailable("k", { ttlMs: 3_600_000 });
+  await store.markUnavailable("k", { ttlMs: 3_600_000, owner: OPTIONS.owner });
 
   // 租約的作用是讓崩潰的實例解鎖；這裡已經確定執行完了，這一列要活到重播窗口
   // 結束為止。沿用租約的話，保護會在幾秒後就消失。
@@ -323,9 +391,9 @@ test("marking unavailable never downgrades an already cached response", async ()
   const { store, database } = createStore();
 
   await store.begin("k", OPTIONS);
-  await store.complete("k", { statusCode: 201, body: { id: 7 } }, { ttlMs: 60000 });
+  await store.complete("k", { statusCode: 201, body: { id: 7 } }, { ttlMs: 60000, owner: OPTIONS.owner });
   // 晚到的一次呼叫不能把一個還能重播的回應改成「回應不見了」。
-  await store.markUnavailable("k", { ttlMs: 60000 });
+  await store.markUnavailable("k", { ttlMs: 60000, owner: OPTIONS.owner });
 
   assert.equal(database.rows.get("k").state, "completed");
   assert.deepEqual(await store.begin("k", OPTIONS), {
@@ -340,7 +408,7 @@ test("purge deletes only expired rows and reports the count", async () => {
   const { store, database } = createStore();
 
   await store.begin("stale", OPTIONS);
-  await store.complete("stale", { statusCode: 200, body: {} }, { ttlMs: 1000 });
+  await store.complete("stale", { statusCode: 200, body: {} }, { ttlMs: 1000, owner: OPTIONS.owner });
   database.state.dbNowSeconds += 2000;
   await store.begin("fresh", OPTIONS);
 

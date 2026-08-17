@@ -262,11 +262,7 @@ export class ServiceContainer {
       if (!activeScope.promises.has(name)) {
         activeScope.promises.set(
           name,
-          this.createInstance(definition, { track: false, scope: activeScope })
-            .then((instance) => {
-              activeScope.instances.set(name, instance);
-              return instance;
-            })
+          this.createScopedInstance(definition, activeScope, { publish: true })
             .finally(() => activeScope.promises.delete(name))
         );
       }
@@ -279,10 +275,7 @@ export class ServiceContainer {
         throw new Error(`Request service scope is closed: ${name}`);
       }
 
-      return this.createInstance(definition, {
-        track: false,
-        scope: activeScope
-      });
+      return this.createScopedInstance(definition, activeScope);
     }
 
     if (!this.initializationPromises.has(name)) {
@@ -356,6 +349,47 @@ export class ServiceContainer {
     });
   }
 
+  async createScopedInstance(definition, scope, { publish = false } = {}) {
+    const instance = await this.createInstance(definition, { track: false, scope });
+
+    if (!scope) {
+      return instance;
+    }
+
+    if (scope.closed) {
+      const lifecycleMethod = instance.shutdown || instance.close;
+      let cleanupError;
+
+      try {
+        await withTimeout(
+          lifecycleMethod?.call(instance),
+          scope.shutdownTimeoutMs
+        );
+      } catch (error) {
+        cleanupError = error;
+        reportInternalFailure("services.late_scope_cleanup_failed", error, {
+          service: definition.name
+        });
+      }
+
+      throw new Error(
+        `Request service scope is closed: ${definition.name}`,
+        cleanupError ? { cause: cleanupError } : undefined
+      );
+    }
+
+    // closed 的檢查與 tracking 之間刻意沒有 await：scope 只能在這段同步工作
+    // 之前或之後開始 shutdown，因此 instance 不是被正常 shutdown 看見，就是
+    // 走上面的晚到清理，不能掉在兩者之間。
+    scope.creationOrder.push({ name: definition.name, instance });
+
+    if (publish) {
+      scope.instances.set(definition.name, instance);
+    }
+
+    return instance;
+  }
+
   async createInstance(definition, { track = true, scope } = {}) {
     const dependencies = new Map();
 
@@ -405,8 +439,6 @@ export class ServiceContainer {
     if (track) {
       this.instances.set(definition.name, instance);
       this.creationOrder.push(definition.name);
-    } else if (scope) {
-      scope.creationOrder.push({ name: definition.name, instance });
     }
 
     return instance;
@@ -419,6 +451,7 @@ export class ServiceContainer {
       creationOrder: [],
       closedInstances: new Set(),
       closed: false,
+      shutdownTimeoutMs: undefined,
       shutdownPromise: null,
       shutdown: null
     };
@@ -439,6 +472,8 @@ export class ServiceContainer {
           return scope.shutdownPromise;
         }
 
+        scope.closed = true;
+        scope.shutdownTimeoutMs = timeoutMs;
         scope.shutdownPromise = (async () => {
           const failures = [];
 
@@ -467,7 +502,6 @@ export class ServiceContainer {
             scope.closedInstances.add(instance);
           }
 
-          scope.closed = true;
           this.activeScopes.delete(scope);
 
           return Object.freeze({

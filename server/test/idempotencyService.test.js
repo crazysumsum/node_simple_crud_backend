@@ -345,7 +345,13 @@ test("a success with no captured body is closed, not released", async () => {
   await manager.execute(createRequest(), createResponse(), routeOptions, () => "no body");
 
   assert.deepEqual(released, []);
-  assert.deepEqual(closed, [{ key: closed[0]?.key, ttlMs: routeOptions.ttlMs }]);
+  assert.deepEqual(closed, [
+    { key: closed[0]?.key, ttlMs: routeOptions.ttlMs, owner: closed[0]?.owner }
+  ]);
+  // owner 是隨機憑證：不要求特定值，但一定要有，否則 markUnavailable() 收不到
+  // fencing 需要的東西，寫入請求會全部被誤判成租約已經易主。
+  assert.equal(typeof closed[0]?.owner, "string");
+  assert.ok(closed[0].owner.length > 0);
 });
 
 test("a response that cannot be stored is closed, not released", async () => {
@@ -448,6 +454,78 @@ test("a store that cannot even close the key says so at error level", async () =
   );
   assert.equal(entry.level, "error");
   assert.equal(entry.context.reason, "store_failed");
+});
+
+// --- 租約易主：owner 對不上時的可見性 -----------------------------------------
+//
+// begin() 帶的 owner 沒對上，不代表出了例外——它代表這個請求活得比自己的
+// idempotency 租約還久，另一個呼叫者已經接手了同一個 key。store 用回傳 false
+// 表達這件事（而不是 throw），這裡要確認 manager 真的把它變成一筆看得見的
+// error 記錄，而不是靜默吞掉。
+
+test("a lease lost during complete() is logged, not silently dropped", async () => {
+  const store = recordingStore({ complete: async () => false });
+  const { manager, logger } = createManager(store);
+  const res = createResponse();
+
+  // 業務操作照常成功；owner 對不上只影響「這個 key 之後能不能被重播」，
+  // 不影響這個請求本身收到的回應。
+  const result = await manager.execute(createRequest(), res, routeOptions, () => {
+    res.status(201).json({ id: 1 });
+    return "done";
+  });
+
+  assert.equal(result, "done");
+  const entry = logger.entries.find((candidate) => candidate.event === "idempotency.lease_lost");
+  assert.ok(entry, "租約遺失必須留下記錄");
+  assert.equal(entry.level, "error");
+  assert.equal(entry.context.reason, "complete");
+});
+
+test("a lease lost during the release after an uncacheable status is logged", async () => {
+  const store = recordingStore({ fail: async () => false });
+  const { manager, logger } = createManager(store);
+  const res = createResponse();
+
+  await manager.execute(createRequest(), res, routeOptions, () => {
+    res.status(422).json({ error: "invalid" });
+  });
+
+  const entry = logger.entries.find((candidate) => candidate.event === "idempotency.lease_lost");
+  assert.ok(entry, "租約遺失必須留下記錄");
+  assert.equal(entry.level, "error");
+  assert.equal(entry.context.reason, "fail_after_uncacheable_status");
+});
+
+test("a lease lost during markUnavailable() is logged", async () => {
+  const store = recordingStore({ markUnavailable: async () => false });
+  const { manager, logger } = createManager(store);
+
+  await manager.execute(createRequest(), createResponse(), routeOptions, () => "no body");
+
+  const entry = logger.entries.find((candidate) => candidate.event === "idempotency.lease_lost");
+  assert.ok(entry, "租約遺失必須留下記錄");
+  assert.equal(entry.level, "error");
+  assert.equal(entry.context.reason, "no_response_body");
+});
+
+test("a store with no fencing support (returns undefined) is not treated as lease loss", async () => {
+  // 最小介面的替身（例如「an adapter may leave fail and close unimplemented」
+  // 測的那種）沒有 fencing 能力，回傳 undefined。那是「沒有訊號」，不是「租約
+  // 遺失」——誤判的話每一個接到這種 store 的請求都會多一筆假警報。
+  const store = recordingStore();
+  const { manager, logger } = createManager(store);
+  const res = createResponse();
+
+  await manager.execute(createRequest(), res, routeOptions, () => {
+    res.status(201).json({ id: 1 });
+    return "done";
+  });
+
+  assert.equal(
+    logger.entries.some((entry) => entry.event === "idempotency.lease_lost"),
+    false
+  );
 });
 
 test("res.json is restored after execute, cached or not", async () => {
