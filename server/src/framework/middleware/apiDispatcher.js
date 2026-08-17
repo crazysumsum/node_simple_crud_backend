@@ -178,11 +178,20 @@ export function validateApiConfig(
       );
     }
 
-    if (configuredRoutes.has(routeKey)) {
-      throw new Error(`Duplicate API config: ${routeKey}`);
+    // Express 的 Router 預設 caseSensitive:false、strict:false，所以
+    // /api/v1/Users 與 /api/v1/users、/api/v1/items 與 /api/v1/items/ 會匹配到
+    // 同一層。用原始 path 查重的話兩條都通過驗證，但後註冊的那條永遠收不到
+    // 請求——它宣告的 authType 與 authorizationPolicies 靜靜地失效，實際生效的
+    // 是先註冊那條的策略。啟動日誌照樣印出兩條，沒有任何訊號指向這件事。
+    const canonicalKey = `${method} ${route.path.toLowerCase().replace(/\/+$/, "")}`;
+
+    if (configuredRoutes.has(canonicalKey)) {
+      throw new Error(
+        `Duplicate API config: ${routeKey}. Express matches paths case-insensitively and ignores a trailing slash, so this route would never receive a request—an earlier equivalent route would handle it, under its own authorization policies.`
+      );
     }
 
-    configuredRoutes.add(routeKey);
+    configuredRoutes.add(canonicalKey);
   }
 }
 
@@ -415,14 +424,25 @@ export function createApiDispatcher({
   // 那些位元組是 Buffer、落在 V8 堆之外——--max-old-space-size 擋不住，程序
   // 只會被 OOM killer 殺掉，沒有例外也沒有堆疊。
   //
-  // 所以這裡把乘積算出來寫進啟動日誌。它不是限制，限制在 gate 與每條 route 的
-  // maxRequestBytes 上；它是那個一直看不見的數字。
+  // 所以這裡把乘積算出來，對著 maxUploadMemoryBytes 檢查，再寫進啟動日誌。
+  // 乘積本身一直是被強制的（gate 管併發數，每條 route 的 maxRequestBytes 管
+  // 單一請求），缺的一直是「這台機器負擔不負擔得起」這個判斷。
   const uploadApis = registeredApis.filter(({ upload }) => upload.enabled);
 
   if (uploadApis.length > 0) {
     const largestRequestBytes = Math.max(
       ...uploadApis.map(({ upload }) => upload.maxRequestBytes)
     );
+    const worstCaseBytes = apiUpload.maxConcurrentUploads * largestRequestBytes;
+
+    // 光是把數字印出來擋不住任何事——設定得離譜的實例照樣啟動，然後在負載下
+    // 被 OOM killer 殺掉。這裡把它變成啟動檢查，與這個檔案裡其他守衛同一個
+    // 形狀：設定不可行就別啟動。
+    if (worstCaseBytes > apiUpload.maxUploadMemoryBytes) {
+      throw new Error(
+        `Upload configuration allows ${worstCaseBytes} bytes of concurrent buffering (maxConcurrentUploads ${apiUpload.maxConcurrentUploads} × largest maxRequestBytes ${largestRequestBytes}), which exceeds api.upload.maxUploadMemoryBytes (${apiUpload.maxUploadMemoryBytes}). These Buffers live outside the V8 heap, so the process would be OOM-killed without an exception or a stack. Lower maxConcurrentUploads or the route's maxRequestBytes, or raise maxUploadMemoryBytes to match the memory this instance actually has.`
+      );
+    }
 
     void activeLogger.info(
       "api.upload_budget",
@@ -430,8 +450,9 @@ export function createApiDispatcher({
       {
         maxConcurrentUploads: apiUpload.maxConcurrentUploads,
         largestRequestBytes,
-        worstCaseBytes: apiUpload.maxConcurrentUploads * largestRequestBytes,
-        note: "Uploads are buffered in memory until they are verified, so this is the worst-case resident size. These Buffers live outside the V8 heap, so --max-old-space-size does not bound them.",
+        worstCaseBytes,
+        maxUploadMemoryBytes: apiUpload.maxUploadMemoryBytes,
+        note: "Uploads are buffered in memory until they are verified, so this is the worst-case sustained size. Assembling each file briefly costs twice its size, so short peaks above this number are expected. These Buffers live outside the V8 heap, so --max-old-space-size does not bound them.",
         apis: uploadApis.map(({ method, path, upload }) => ({
           api: `${method.toLowerCase()} ${path}`,
           maxRequestBytes: upload.maxRequestBytes,
