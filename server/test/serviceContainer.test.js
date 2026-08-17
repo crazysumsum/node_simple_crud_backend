@@ -435,6 +435,69 @@ test("service resolution automatically uses the active asynchronous request scop
   );
 });
 
+for (const lifecycle of ["request", "transient"]) {
+  test(`${lifecycle} services initialized after scope shutdown are closed instead of tracked`, async () => {
+    const events = [];
+    let releaseInitialization;
+    let markInitializationStarted;
+    const initializationStarted = new Promise((resolve) => {
+      markInitializationStarted = resolve;
+    });
+    const initializationGate = new Promise((resolve) => {
+      releaseInitialization = resolve;
+    });
+
+    class LateService {
+      static service = {
+        name: "late",
+        lifecycle,
+        dependencies: []
+      };
+
+      async initialize() {
+        events.push("initialize:start");
+        markInitializationStarted();
+        await initializationGate;
+        events.push("initialize:end");
+      }
+
+      async shutdown() {
+        events.push("shutdown");
+      }
+    }
+
+    const container = new ServiceContainer({
+      definitions: [definition(LateService)]
+    });
+    const scope = container.createScope();
+    const resolving = scope.resolve("late");
+
+    await initializationStarted;
+    const shuttingDown = scope.shutdown({ timeoutMs: 5 });
+
+    assert.throws(() => scope.run(() => {}), /scope is closed/);
+
+    const result = await shuttingDown;
+
+    if (lifecycle === "request") {
+      assert.equal(result.closed, false);
+      assert.deepEqual(
+        result.failures.map(({ name }) => name),
+        ["request-service-initialization"]
+      );
+    } else {
+      assert.equal(result.closed, true);
+    }
+
+    releaseInitialization();
+
+    await assert.rejects(resolving, /scope is closed/);
+    assert.deepEqual(events, ["initialize:start", "initialize:end", "shutdown"]);
+    assert.equal(scope.get("late"), undefined);
+    await assert.rejects(() => scope.resolve("late"), /scope is closed/);
+  });
+}
+
 test("singleton services reject request-scoped dependencies", () => {
   class RequestService {
     static service = {
