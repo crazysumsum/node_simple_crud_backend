@@ -415,7 +415,35 @@ test("a successful refresh picks up another instance's revocation", async () => 
   assert.equal(service.isRevoked({ sub: "42", ver: 0 }), true);
 });
 
-test("an oversized snapshot warns but still loads", async () => {
+test("the load query caps rows at maxCachedSubjects + 1, not the whole table", async () => {
+  const database = fakeDatabase({ rows: [{ subject: "42", version: 1 }] });
+  const { service } = createService({ database, config: { maxCachedSubjects: 5 } });
+
+  await service.initialize();
+
+  const [loadQuery] = database.state.queries.filter(({ sql }) =>
+    sql.includes("SELECT subject, version")
+  );
+  // +1 是用來分辨「剛好等於上限」與「超過上限」，不是給快照用的：真正超過
+  // 預算時，這一列永遠不會被放進 Map。
+  assert.match(loadQuery.sql, /LIMIT 6\b/);
+});
+
+test("a snapshot exactly at the limit still loads", async () => {
+  const database = fakeDatabase({
+    rows: [
+      { subject: "1", version: 1 },
+      { subject: "2", version: 2 }
+    ]
+  });
+  const { service } = createService({ database, config: { maxCachedSubjects: 2 } });
+
+  await service.initialize();
+
+  assert.equal(service.snapshot.size, 2);
+});
+
+test("startup fails when the snapshot exceeds maxCachedSubjects", async () => {
   const database = fakeDatabase({
     rows: [
       { subject: "1", version: 1 },
@@ -427,14 +455,46 @@ test("an oversized snapshot warns but still loads", async () => {
     config: { maxCachedSubjects: 1 }
   });
 
-  await service.initialize();
+  // 截斷的快照比沒有快照更糟：界外的 subject 會靜默地免疫於撤銷。所以這是
+  // 啟動失敗，跟資料庫打不通時的規則一致——啟動成功就代表狀態穩定。
+  await assert.rejects(
+    () => service.initialize(),
+    /exceeds maxCachedSubjects \(1\)/
+  );
+  assert.equal(service.loadedAtMs, null);
 
-  // 拒絕載入等於把一個監控問題升級成服務中斷。
-  assert.equal(service.snapshot.size, 2);
   const entry = logger.entries.find(
     ({ event }) => event === "auth.revocation.snapshot_oversized"
   );
-  assert.equal(entry.level, "warn");
+  assert.equal(entry.level, "error");
+  assert.equal(entry.context.maxCachedSubjects, 1);
+});
+
+test("a refresh that would exceed maxCachedSubjects fails open and leaves the old snapshot untouched", async () => {
+  const database = fakeDatabase({ rows: [{ subject: "42", version: 3 }] });
+  const { service, logger } = createService({
+    database,
+    config: { maxCachedSubjects: 1 }
+  });
+  await service.initialize();
+  const loadedAtMs = service.loadedAtMs;
+
+  // 另一個實例的名單長過了預算——不代表這個實例已經知道的撤銷要跟著消失。
+  database.state.rows.push({ subject: "43", version: 1 });
+
+  assert.equal(await service.refresh(), false);
+
+  // 舊快照原封不動，跟資料庫打不通時的 fail open 是同一條路徑。
+  assert.equal(service.snapshot.get("42"), 3);
+  assert.equal(service.loadedAtMs, loadedAtMs);
+  assert.equal(service.isRevoked({ sub: "42", ver: 2 }), true);
+
+  assert.ok(
+    logger.entries.some(({ event }) => event === "auth.revocation.snapshot_oversized")
+  );
+  assert.ok(
+    logger.entries.some(({ event }) => event === "auth.revocation.refresh_failed")
+  );
 });
 
 // --- 簽發時要拿到的版本號 ----------------------------------------------------
