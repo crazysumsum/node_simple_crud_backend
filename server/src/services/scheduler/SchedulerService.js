@@ -258,12 +258,6 @@ export class SchedulerService extends BaseService {
 
     const controller = new AbortController();
     const startedAt = this.time.nowMs();
-    stats.lastStartedAt = startedAt;
-    // 進行中就是進行中：把上一輪的完成時間留在欄位裡，會讓讀的人以為那是這一
-    // 輪的結果。
-    stats.lastFinishedAt = null;
-    stats.lastDurationMs = null;
-    stats.lastOutcome = "running";
     // timeoutMs 從這裡開始算，取租約也算在裡面——租約取得本身沒有計時器保護，
     // 慢的資料庫可以讓它無限期掛著；不把它包進同一個預算的話，這段 await 就
     // 完全不受任何上限節制。
@@ -305,6 +299,7 @@ export class SchedulerService extends BaseService {
             // 工作本身沒有跑，但這一輪確實失敗了。記成一次結果為 leaseFailed 的
             // 嘗試，否則症狀只剩下「runs 停止增加」，看不出是資料庫的問題。
             const finishedAt = this.time.nowMs();
+            stats.lastStartedAt = startedAt;
             stats.lastFinishedAt = finishedAt;
             stats.lastDurationMs = finishedAt - startedAt;
             stats.lastOutcome = "leaseFailed";
@@ -322,6 +317,7 @@ export class SchedulerService extends BaseService {
             stats.consecutiveFailures += 1;
             stats.timeouts += 1;
             const finishedAt = this.time.nowMs();
+            stats.lastStartedAt = startedAt;
             stats.lastFinishedAt = finishedAt;
             stats.lastDurationMs = finishedAt - startedAt;
             stats.lastOutcome = "leaseTimedOut";
@@ -345,6 +341,15 @@ export class SchedulerService extends BaseService {
             return;
           }
         }
+
+        // 只有真的要跑了才進入「執行中」狀態。not-leader 這類正常跳過不該
+        // 覆蓋上一輪真正執行的紀錄，計數器已經表達過那件事了。
+        stats.lastStartedAt = startedAt;
+        // 進行中就是進行中：把上一輪的完成時間留在欄位裡，會讓讀的人以為那是
+        // 這一輪的結果。
+        stats.lastFinishedAt = null;
+        stats.lastDurationMs = null;
+        stats.lastOutcome = "running";
 
         await job.run(controller.signal);
         stats.runs += 1;
